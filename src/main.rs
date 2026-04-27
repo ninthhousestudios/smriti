@@ -105,7 +105,10 @@ fn main() -> Result<()> {
         Commands::Prune { older_than, .. } => cmd_prune(&config, older_than)?,
         Commands::Health => cmd_health(&config)?,
         Commands::Daemon => {
-            eprintln!("daemon not implemented (Wave 5)");
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(smriti::daemon::run_stdio(config))?;
         }
     }
 
