@@ -69,6 +69,8 @@ enum Commands {
     },
     /// Show health status
     Health,
+    /// Show status of the most recent scan run
+    ScanStatus,
     /// Run the background daemon (Wave 5)
     Daemon,
 }
@@ -104,6 +106,7 @@ fn main() -> Result<()> {
         Commands::Roots { action } => cmd_roots(action)?,
         Commands::Prune { older_than, .. } => cmd_prune(&config, older_than)?,
         Commands::Health => cmd_health(&config)?,
+        Commands::ScanStatus => cmd_scan_status(&config)?,
         Commands::Daemon => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -379,6 +382,28 @@ fn cmd_health(config: &Config) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn cmd_scan_status(config: &Config) -> Result<()> {
+    let conn = smriti::db::open(&config.db_path)?;
+    match smriti::scanner::scan_status(&conn)? {
+        Some(status) => {
+            println!("Scan #{}", status.id);
+            println!("  Status:     {}", status.status);
+            println!("  Started:    {}", status.started_at);
+            if let Some(ref finished) = status.finished_at {
+                println!("  Finished:   {finished}");
+            }
+            println!("  Files seen: {}", status.files_seen);
+            if let Some(ref err) = status.error {
+                println!("  Error:      {err}");
+            }
+        }
+        None => {
+            println!("No scan runs recorded yet.");
+        }
+    }
     Ok(())
 }
 

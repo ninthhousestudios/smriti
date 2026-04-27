@@ -22,6 +22,7 @@ fn test_config(tmp: &TempDir) -> Config {
         fts_content_max_bytes: 102400,
         max_metadata_bytes: 524288000,
         audit_retention_days: 30,
+        scan_batch_size: 500,
     }
 }
 

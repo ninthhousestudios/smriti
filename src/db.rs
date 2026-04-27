@@ -42,7 +42,40 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     let sql = include_str!("../migrations/0001_initial.sql");
     conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
         message: e.to_string(),
-    })
+    })?;
+
+    // 0002: scan generations — ALTER TABLE ADD COLUMN is not idempotent,
+    // so check whether the column exists before running the migration.
+    let has_last_seen: bool = conn
+        .prepare("SELECT last_seen_scan FROM paths LIMIT 0")
+        .is_ok();
+    if !has_last_seen {
+        let sql = include_str!("../migrations/0002_scan_generations.sql");
+        conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
+            message: format!("0002_scan_generations: {e}"),
+        })?;
+    } else {
+        // Columns exist; still ensure the table and indexes are present
+        // (CREATE TABLE/INDEX IF NOT EXISTS are idempotent).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scan_runs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at  TIMESTAMP NOT NULL,
+                finished_at TIMESTAMP,
+                status      TEXT NOT NULL CHECK (status IN ('running', 'complete', 'failed')),
+                files_seen  INTEGER NOT NULL DEFAULT 0,
+                error       TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_paths_last_seen ON paths(last_seen_scan)
+                WHERE disappeared IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_events_scan_id ON events(scan_id);",
+        )
+        .map_err(|e| SmritiError::Migration {
+            message: format!("0002_scan_generations (idempotent): {e}"),
+        })?;
+    }
+
+    Ok(())
 }
 
 pub fn prune_events(conn: &Connection, older_than: Duration) -> Result<u64> {

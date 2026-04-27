@@ -1,6 +1,6 @@
 # Scanner refactor: batched commits with scan generations
 
-Status: proposed
+Status: implemented (behind SMRITI_SCAN_BATCHED=1 gate)
 Owner: josh
 Drafted: 2026-04-27
 
