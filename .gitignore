@@ -1,0 +1,8 @@
+target/
+Cargo.lock
+.smriti/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
