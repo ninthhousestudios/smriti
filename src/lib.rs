@@ -1,0 +1,14 @@
+pub mod config;
+pub mod db;
+pub mod daemon;
+pub mod embedding;
+pub mod envelope;
+pub mod error;
+pub mod hasher;
+pub mod ignore;
+pub mod metadata;
+pub mod mcp;
+pub mod privacy;
+pub mod roots;
+pub mod scanner;
+pub mod search;

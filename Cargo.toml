@@ -1,0 +1,71 @@
+[package]
+name = "smriti"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "smriti"
+
+[[bin]]
+name = "smriti"
+path = "src/main.rs"
+
+[dependencies]
+# Database
+rusqlite = { version = "0.31", features = ["bundled-full"] }
+sqlite-vec = "0.1"
+
+# Hashing
+blake3 = "1"
+
+# Filesystem
+walkdir = "2"
+ignore = "0.4"
+
+# MCP protocol
+rmcp = { version = "1", features = ["server", "transport-io", "macros", "schemars"] }
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-std", "net", "sync"] }
+
+# Embedding (optional via feature)
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "ndarray"], optional = true }
+tokenizers = { version = "0.20", optional = true }
+ndarray = { version = "0.16", optional = true }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Config
+dotenvy = "0.15"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Schema generation (for MCP)
+schemars = { version = "1", features = ["chrono04"] }
+
+# HTTP transport (optional)
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.6", features = ["auth"], optional = true }
+
+[features]
+default = []
+embedding = ["ort", "tokenizers", "ndarray"]
+http = ["axum", "tower-http"]
+
+[dev-dependencies]
+tempfile = "3"
+assert_fs = "1"
