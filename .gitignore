@@ -6,3 +6,6 @@ Cargo.lock
 *.db-shm
 .env
 .env.*
+
+# AgentOps session artifacts
+.agents/
