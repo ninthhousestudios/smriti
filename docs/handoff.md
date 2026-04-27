@@ -2,53 +2,71 @@
 
 ## Pick up
 
-Implementation plan is complete and pre-mortem passed. No code exists yet. Start with **Issue 1** (project scaffold + core types).
+Mid-crank on the v0.1 implementation plan. Waves 1–3 (Issues 1–5) done and committed. **Resume at Wave 4 — Issue 6 (Search + CLI)**, the first user-visible milestone.
 
-### Key artifacts
+### State of the world
 
-- **Implementation plan:** `.agents/plans/2026-04-26-smriti-v01-implementation.md` — 8 issues, 5 waves, symbol-level detail
-- **Pre-mortem:** `.agents/council/2026-04-26-pre-mortem-smriti-v01.md` — all 12 findings addressed in plan
-- **Design sketch:** `docs/smriti-sketch.md` — comprehensive design (schema, tools, algorithms)
-- **Research:** `.agents/research/2026-04-26-smriti-implementation.md` — chitta-rs patterns, crate ecosystem
+- Repo is now a git repo (`git init` was done this session). Branch: `main`.
+- Three wave commits on top of the initial design-docs commit. `git log --oneline` to see.
+- `cargo build` clean. `cargo test` = 48 pass, 1 ignored (fuzzy_move_plus_edit, deferred to v0.2).
+- sqlite-vec extension loads cleanly (the highest ecosystem risk per the plan was validated in Wave 1: v0.1.9-alpha.3).
 
-### Implementation order
+### What's done
 
+| Wave | Issue | Commit | Files |
+|---|---|---|---|
+| 1 | 1 — scaffold + core types | `7ecfee1` | Cargo.toml, lib/main, config, error, envelope, db, roots, migrations/0001_initial.sql, stub modules for later issues |
+| 2 | 2 — ignore parser | `0476595` | src/ignore.rs, src/ignore_defaults.txt, tests/ignore_test.rs |
+| 2 | 3 — hasher + metadata | `0476595` | src/hasher.rs, src/metadata.rs (inline tests) |
+| 2 | 4 — privacy gate | `0476595` | src/privacy.rs, tests/privacy_test.rs |
+| 3 | 5 — scanner | (latest) | src/scanner.rs, tests/{scan,move_detection,mtime_shortcircuit}_test.rs |
+
+### What's next
+
+**Wave 4 — Issue 6: Search + CLI (first milestone).**
+Files: `src/search.rs`, `src/main.rs` (full impl, replace the stub clap handlers), `tests/integration_test.rs`.
+After Issue 6 ships, `smriti init && smriti roots add ~/Documents && smriti scan && smriti audit` should produce a real backup audit. That's the "useful from the CLI" line.
+
+**Wave 5 (parallel after Wave 4) — Issues 7 + 8: MCP server + daemon, Embedding pipeline.**
+- Issue 7: `src/mcp.rs`, `src/daemon.rs`, `src/main.rs` (daemon subcommand)
+- Issue 8: `src/embedding.rs`, `src/search.rs` (additions for dense + RRF, gated behind `embedding` feature)
+
+### Decisions made this session worth remembering
+
+- **`PrivacyGate.conn` was wrong in the plan.** Connection by-ref per-call is correct; daemon will hold `Arc<Mutex<Connection>>`, CLI uses short-lived conn.
+- **`SectionRules` isn't `Clone`** because `ignore::gitignore::Gitignore` isn't `Clone`. Scanner builds fresh `hardened_defaults(root)` per root rather than fighting it. Privacy gate classifies directly against the public `ignored`/`cataloged` `Gitignore` fields — bypassing `IgnoreStack` to avoid ownership transfer.
+- **Schema column names diverged from the plan in places** — the migration in `migrations/0001_initial.sql` is the source of truth. Notably `paths` uses `(appeared, disappeared)` timestamps not an `is_current` bool; `documents` has only `first_seen`; `snapshots` has a single `timestamp`. Issue 6 search queries should follow the actual schema.
+- **rusqlite `bundled-full` enables `extra_check`** which makes `pragma_update` reject row-returning PRAGMAs. Already worked around in `db.rs` via `pragma_update_and_check(…, |_| Ok(()))`. If Issue 7's daemon needs more PRAGMAs, use the same pattern.
+- **Symlinks: skipped with debug log in v0.1.** Plan called this pragmatic; full link-entry recording deferred.
+- **Short-circuit re-scan path collision:** the `paths` table has `UNIQUE(content_hash, path, appeared)`. Same-second re-scans of unchanged files would collide on a fresh insert; scanner now un-disappears (NULLs `disappeared`) instead of inserting a new row. See `src/scanner.rs`.
+
+### Blockers / risks for Wave 4–5
+
+- **rmcp `serve()` ownership** for the daemon — plan flags this as needing early verification. Worth confirming whether `serve()` moves `self` before designing the Unix-socket per-connection spawn pattern.
+- **sqlite-vec dense queries from rusqlite** — extension loads, but Issue 8 will be the first time we actually run `vec0` ANN queries. Validate with a tiny smoke insert+query before wiring scanner storage.
+- **`src/main.rs` is a hot file** across Issues 6 and 7. Wave 5 must branch from post-Issue-6 SHA (already set up — Issue 6 commits before Issue 7 starts).
+
+### How to resume
+
+```bash
+cd /home/josh/soft/smriti
+git log --oneline -5    # confirm where we are
+cargo test              # baseline: 48 pass, 1 ignored
+# Then continue /crank — Wave 4 is Issue 6 alone, Wave 5 spawns Issues 7+8 in parallel.
 ```
-Wave 1: scaffold (Cargo.toml, config, error, db, roots, migrations)
-Wave 2: ignore parser || hasher+metadata || privacy gate  (parallel)
-Wave 3: scanner
-Wave 4: search + CLI  ← first milestone: smriti scan + smriti audit
-Wave 5: MCP+daemon || embedding  (parallel)
-```
 
-### Validate first
+TaskList state at pause: Issue 6 pending (was blocked-by Issue 5, now unblocked), Issues 7+8 pending blocked-by Issue 6.
 
-**sqlite-vec loading** is the highest ecosystem risk. After `cargo build` succeeds in Issue 1, immediately test that `sqlite-vec` extension loads and the `vec0` virtual table works with rusqlite. If it doesn't, everything downstream is blocked.
+### Open threads
 
-### Critical design decisions to remember
+- Decision: do we want full symlink recording in v0.1, or accept the v0.2 deferral as committed?
+- Decision: is the `fuzzy_move_plus_edit` test worth implementing now, or is `Deleted+Created` for that case acceptable?
+- Sangha advisory lock for daemon scans (mentioned in plan §7) — Sangha MCP wasn't available this session; check at Wave 5 start.
 
-1. **`ignore` crate, not `globset`** — for full gitignore semantics. Use `ignore::gitignore::Gitignore` struct as standalone matcher.
-2. **Incremental `IgnoreStack`** — push/pop layers as scanner enters/exits directories with local .smritiignore files. Not batch loading.
-3. **Path canonicalization** in privacy gate — `std::fs::canonicalize()` prevents traversal attacks.
-4. **Module-owns-queries** — db.rs handles connection + migrations only. Each module (scanner, search, privacy) defines its own SQL functions taking `&Connection`.
-5. **Roots are arbitrary absolute paths** — not assumed under `~`. Backup drives, NAS mounts work.
-6. **FTS content threshold** — `SMRITI_FTS_CONTENT_MAX_BYTES` (100KB). Large files get title+topics+summary only.
-7. **Metadata extraction cap** — `SMRITI_MAX_METADATA_BYTES` (500MB). Above this → `is_binary=true`, skip extraction.
-8. **Stale socket detection** — daemon tries connect before bind, removes stale socket.
+### Transcript
 
-### Suggestions from gemini-flash review (2026-04-26)
+`/home/josh/.claude/projects/-home-josh-soft-smriti/edf9be41-c7c0-48fc-a3de-ade3fb4d2355.jsonl`
 
-Source: `~/soft/manas/docs/gemini-flash-suggestions.md`. Two items relevant to smriti:
+### Note on Chitta
 
-1. **Default-deny indexing.** Indexing `~` by default is a security risk — embeddings of secrets are recoverable from a vector index. Smriti should require explicit allowlisted roots (no implicit `~`). Aligns with existing design decision #5 ("roots are arbitrary absolute paths") but should be enforced: refuse to scan unless at least one root is explicitly added, and never auto-add `~`.
-
-2. **Freshness envelopes on all read tools.** Every smriti tool that returns indexed data should include `as_of` (ms since epoch when the data was indexed/scanned) and `is_stale` (boolean against some threshold). Lets callers reason about whether they're looking at a fresh scan or a three-day-old snapshot. This is a cross-subsystem manas principle — see `manas/docs/freshness-envelopes.md` (TBD) for the shared rule.
-
-Sideband sync between smriti and chitta (file-move propagation without LLM round-trip) was also suggested but is already known — track in the broader manas roadmap, not here.
-
-### Upstream docs (unchanged from prior session)
-
-- Grantha sketch: `docs/grantha-sketch.md`
-- Opus 4.7 review: `~/soft/chitta/docs/manas-opus47-review.md`
-- Master roadmap: `~/soft/manas/docs/roadmap.md`
-- Manas architecture: `~/soft/chitta/docs/manas-architecture.md`
+Chitta MCP was not available in this session — `mcp__chittars__*` tools weren't surfaced. Decisions and observations above were not stored to long-term memory. If you want them in Chitta, ask in a session where Chitta is up and reference this handoff.
