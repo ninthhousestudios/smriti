@@ -109,6 +109,7 @@ struct CurrentEntry {
     inode: u64,
     is_large: bool,       // exceeds max_metadata_bytes — skip metadata extraction
     short_circuited: bool, // mtime+size matched prev; hash reused, no re-hash needed
+    embed_excluded: bool,  // IndexedNoEmbed classification — skip embedding
 }
 
 // ---------------------------------------------------------------------------
@@ -302,13 +303,13 @@ fn scan_legacy(
                     continue;
                 }
 
-                PathClassification::Indexed | PathClassification::IndexedNoEmbed => {
+                classification @ (PathClassification::Indexed | PathClassification::IndexedNoEmbed) => {
+                    let embed_excluded = matches!(classification, PathClassification::IndexedNoEmbed);
+
                     if is_dir {
-                        // Normal directory — already pushed to ignore stack above.
                         continue;
                     }
 
-                    // Skip symlinks and non-regular files (sockets, pipes, devices).
                     if entry.path_is_symlink() {
                         tracing::debug!("skipping symlink: {}", path.display());
                         continue;
@@ -318,7 +319,6 @@ fn scan_legacy(
                         continue;
                     }
 
-                    // Get filesystem metadata.
                     let fs_meta = match entry.metadata() {
                         Ok(m) => m,
                         Err(e) => {
@@ -327,33 +327,31 @@ fn scan_legacy(
                         }
                     };
 
-                    let mtime = fs_meta.mtime(); // seconds since epoch
+                    let mtime = fs_meta.mtime();
                     let size_bytes = fs_meta.size() as i64;
                     let inode = fs_meta.ino();
                     let is_large = fs_meta.len() > config.max_metadata_bytes;
 
                     seen_paths.insert(path.to_path_buf());
 
-                    // mtime+size short-circuit.
                     if let Some(prev) = prev_paths.get(path) {
                         if prev.mtime == mtime && prev.size_bytes == size_bytes {
-                            // Unchanged — reuse previous hash, mark short-circuited.
                             current_entries.push(CurrentEntry {
                                 path: path.to_path_buf(),
                                 root: root.clone(),
                                 content_hash: prev.content_hash.clone(),
-                                body_hash: String::new(), // not needed; no change
+                                body_hash: String::new(),
                                 mtime,
                                 size_bytes,
                                 inode,
                                 is_large,
                                 short_circuited: true,
+                                embed_excluded,
                             });
                             continue;
                         }
                     }
 
-                    // Hash the file.
                     let content_hash = match hasher::hash_file(path) {
                         Ok(h) => h,
                         Err(e) => {
@@ -362,7 +360,6 @@ fn scan_legacy(
                         }
                     };
 
-                    // Compute body hash for minor-change detection (only for non-large files).
                     let body_hash = if !is_large {
                         match std::fs::read(path) {
                             Ok(content) => hasher::hash_body(&content),
@@ -382,6 +379,7 @@ fn scan_legacy(
                         inode,
                         is_large,
                         short_circuited: false,
+                        embed_excluded,
                     });
                 }
             }
@@ -545,8 +543,8 @@ fn scan_legacy(
 
             tx.execute(
                 "INSERT OR IGNORE INTO documents
-                    (content_hash, body_hash, title, summary, topics, structure, is_binary, byte_size, first_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    (content_hash, body_hash, title, summary, topics, structure, is_binary, embed_excluded, byte_size, first_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     entry.content_hash,
                     body_hash_opt,
@@ -555,6 +553,7 @@ fn scan_legacy(
                     topics_json,
                     structure_json,
                     is_binary_doc,
+                    entry.embed_excluded,
                     entry.size_bytes,
                     now_str,
                 ],
@@ -626,7 +625,7 @@ fn scan_legacy(
         }
     }
 
-    // 6d. Insert events
+    // 6d. Insert events + clean up orphaned FTS entries
     for event in &events {
         tx.execute(
             "INSERT INTO events (event_type, content_hash, path, timestamp, file_extension, mime_type)
@@ -640,6 +639,14 @@ fn scan_legacy(
                 event.mime_type,
             ],
         )?;
+
+        if matches!(event.event_type, EventType::Updated | EventType::MinorChange) {
+            if let Some(prev) = prev_paths.get(Path::new(&event.path)) {
+                if prev.content_hash != event.content_hash {
+                    cleanup_orphaned_fts(&tx, &prev.content_hash)?;
+                }
+            }
+        }
     }
 
     // 6e. Upsert catalog entries
@@ -873,7 +880,9 @@ fn scan_batched(
                         continue;
                     }
 
-                    PathClassification::Indexed | PathClassification::IndexedNoEmbed => {
+                    classification @ (PathClassification::Indexed | PathClassification::IndexedNoEmbed) => {
+                        let embed_excluded = matches!(classification, PathClassification::IndexedNoEmbed);
+
                         if is_dir {
                             continue;
                         }
@@ -964,6 +973,7 @@ fn scan_batched(
                             inode,
                             is_large,
                             short_circuited,
+                            embed_excluded,
                         });
 
                         if batch.len() >= batch_size {
@@ -1307,8 +1317,8 @@ fn flush_batch(
 
             tx.execute(
                 "INSERT OR IGNORE INTO documents
-                    (content_hash, body_hash, title, summary, topics, structure, is_binary, byte_size, first_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    (content_hash, body_hash, title, summary, topics, structure, is_binary, embed_excluded, byte_size, first_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     entry.content_hash,
                     body_hash_opt,
@@ -1317,6 +1327,7 @@ fn flush_batch(
                     topics_json,
                     structure_json,
                     is_binary_doc,
+                    entry.embed_excluded,
                     entry.size_bytes,
                     now_str,
                 ],
@@ -1389,6 +1400,14 @@ fn flush_batch(
                     scan_id,
                 ],
             )?;
+            if matches!(et, EventType::Updated | EventType::MinorChange) {
+                if let Some(prev) = prev_paths.get(&entry.path) {
+                    if prev.content_hash != entry.content_hash {
+                        cleanup_orphaned_fts(&tx, &prev.content_hash)?;
+                    }
+                }
+            }
+
             batch_events.push(Event {
                 event_type: et,
                 content_hash: entry.content_hash.clone(),
@@ -1438,6 +1457,22 @@ fn determine_event_type_provisional(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Delete FTS row for a content_hash if no active path references it.
+fn cleanup_orphaned_fts(conn: &Connection, content_hash: &str) -> Result<()> {
+    let active_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM paths WHERE content_hash = ?1 AND disappeared IS NULL",
+        params![content_hash],
+        |row| row.get(0),
+    )?;
+    if active_count == 0 {
+        conn.execute(
+            "DELETE FROM document_fts WHERE content_hash = ?1",
+            params![content_hash],
+        )?;
+    }
+    Ok(())
+}
 
 /// Walk a subtree counting total bytes and file count (for catalog entries).
 fn catalog_subtree(dir: &Path) -> (u64, u64) {

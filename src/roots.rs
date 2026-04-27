@@ -57,10 +57,14 @@ pub fn add_root(path: &Path) -> Result<()> {
 pub fn remove_root(path: &Path) -> Result<()> {
     let conf = roots_conf_path();
     if !conf.exists() {
-        return Ok(());
+        return Err(crate::error::SmritiError::Config {
+            var: "roots.conf".to_string(),
+            message: format!("root not found: {}", path.display()),
+        });
     }
     let content = std::fs::read_to_string(&conf)?;
     let path_str = path.to_string_lossy();
+    let original_count = content.lines().count();
     let filtered: String = content
         .lines()
         .filter(|l| {
@@ -70,6 +74,12 @@ pub fn remove_root(path: &Path) -> Result<()> {
         })
         .map(|l| format!("{l}\n"))
         .collect();
+    if filtered.lines().count() == original_count {
+        return Err(crate::error::SmritiError::Config {
+            var: "roots.conf".to_string(),
+            message: format!("root not found: {}", path.display()),
+        });
+    }
     std::fs::write(&conf, &filtered)?;
     Ok(())
 }
