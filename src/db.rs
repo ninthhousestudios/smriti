@@ -26,6 +26,13 @@ pub fn open(path: &Path) -> Result<Connection> {
     // PRAGMA journal_mode returns a row, so we must use pragma_update_and_check.
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
 
+    // Force-checkpoint any existing WAL frames into the main DB and reset
+    // the WAL/SHM files. Without this, a previous crash can leave stale
+    // committed frames in the WAL; when the next large scan transaction
+    // appends on top, the combined WAL triggers SIGBUS in walFindFrame
+    // during SHM hash-table lookups.
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+
     run_migrations(&conn)?;
 
     Ok(conn)

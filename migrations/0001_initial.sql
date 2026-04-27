@@ -1,4 +1,4 @@
-CREATE TABLE documents (
+CREATE TABLE IF NOT EXISTS documents (
     content_hash TEXT PRIMARY KEY,
     body_hash TEXT,
     title TEXT,
@@ -12,12 +12,12 @@ CREATE TABLE documents (
     byte_size INTEGER
 );
 
-CREATE VIRTUAL TABLE document_vectors USING vec0(
+CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(
     content_hash TEXT PRIMARY KEY,
     embedding FLOAT[1024]
 );
 
-CREATE VIRTUAL TABLE document_fts USING fts5(
+CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
     content_hash UNINDEXED,
     title,
     topics,
@@ -25,7 +25,7 @@ CREATE VIRTUAL TABLE document_fts USING fts5(
     content
 );
 
-CREATE TABLE paths (
+CREATE TABLE IF NOT EXISTS paths (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_hash TEXT NOT NULL REFERENCES documents(content_hash),
     path TEXT NOT NULL,
@@ -37,10 +37,10 @@ CREATE TABLE paths (
     disappeared TIMESTAMP,
     UNIQUE(content_hash, path, appeared)
 );
-CREATE INDEX idx_paths_path ON paths(path);
-CREATE INDEX idx_paths_disappeared ON paths(disappeared) WHERE disappeared IS NULL;
+CREATE INDEX IF NOT EXISTS idx_paths_path ON paths(path);
+CREATE INDEX IF NOT EXISTS idx_paths_disappeared ON paths(disappeared) WHERE disappeared IS NULL;
 
-CREATE TABLE events (
+CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
     content_hash TEXT NOT NULL,
@@ -51,11 +51,11 @@ CREATE TABLE events (
     file_extension TEXT,
     mime_type TEXT
 );
-CREATE INDEX idx_events_hash ON events(content_hash);
-CREATE INDEX idx_events_path ON events(path);
-CREATE INDEX idx_events_ts ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_hash ON events(content_hash);
+CREATE INDEX IF NOT EXISTS idx_events_path ON events(path);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp);
 
-CREATE TABLE catalog (
+CREATE TABLE IF NOT EXISTS catalog (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL,
     total_bytes INTEGER NOT NULL,
@@ -68,7 +68,7 @@ CREATE TABLE catalog (
     UNIQUE(path)
 );
 
-CREATE TABLE snapshots (
+CREATE TABLE IF NOT EXISTS snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TIMESTAMP NOT NULL,
     tier1_files_scanned INTEGER,
@@ -77,11 +77,11 @@ CREATE TABLE snapshots (
     duration_ms INTEGER
 );
 
-CREATE TABLE read_audit (
+CREATE TABLE IF NOT EXISTS read_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL,
     content_hash TEXT,
     timestamp TIMESTAMP NOT NULL,
     caller TEXT
 );
-CREATE INDEX idx_read_audit_ts ON read_audit(timestamp);
+CREATE INDEX IF NOT EXISTS idx_read_audit_ts ON read_audit(timestamp);

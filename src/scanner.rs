@@ -274,9 +274,13 @@ pub fn scan(
                         continue;
                     }
 
-                    // Skip symlinks.
+                    // Skip symlinks and non-regular files (sockets, pipes, devices).
                     if entry.path_is_symlink() {
                         tracing::debug!("skipping symlink: {}", path.display());
+                        continue;
+                    }
+                    if !entry.file_type().is_file() {
+                        tracing::debug!("skipping non-regular file: {}", path.display());
                         continue;
                     }
 
@@ -452,6 +456,11 @@ pub fn scan(
     // ------------------------------------------------------------------
     // 6. Write everything inside a transaction
     // ------------------------------------------------------------------
+    tracing::info!(
+        "walk complete: {} files current, {} events queued, beginning commit",
+        current_entries.len(),
+        events.len(),
+    );
     let tx = conn.transaction()?;
 
     // 6a. Upsert documents
@@ -482,10 +491,9 @@ pub fn scan(
                             }).collect::<Vec<_>>()
                         ).unwrap_or_else(|_| "[]".to_string());
                         let fts_content = if !meta.is_binary {
-                            std::str::from_utf8(&content).ok().map(|s| {
-                                let max = config.fts_content_max_bytes as usize;
-                                if s.len() > max { s[..max].to_string() } else { s.to_string() }
-                            })
+                            std::str::from_utf8(&content)
+                                .ok()
+                                .map(|s| truncate_to_char_boundary(s, config.fts_content_max_bytes as usize).to_string())
                         } else {
                             None
                         };
@@ -781,4 +789,63 @@ fn classify_section_rules(rules: &SectionRules, path: &Path, is_dir: bool) -> Pa
         return PathClassification::Cataloged;
     }
     PathClassification::Indexed
+}
+
+/// Truncate `s` to at most `max` bytes, walking back to the nearest UTF-8
+/// char boundary. Avoids `s[..max]` panics when `max` lands inside a
+/// multi-byte char (the bug at scanner.rs:491 that crashed scans on
+/// auto-generated unicode-table files).
+fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_at_char_boundary_handles_ascii() {
+        assert_eq!(truncate_to_char_boundary("hello world", 5), "hello");
+        assert_eq!(truncate_to_char_boundary("hi", 100), "hi");
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_walks_back_inside_multibyte() {
+        // 'ᥴ' (U+1964 LIMBU VOWEL SIGN II) is 3 bytes: e1 a5 a4.
+        // The actual file that crashed: byte 102400 was inside this char.
+        let mut s = String::from("a"); // 1 ascii byte
+        s.push('ᥴ'); // 3 bytes -> total 4
+        // Asking for max=2 lands in the middle of the multi-byte char.
+        // Without the fix: s[..2] panics. With the fix: walks back to byte 1.
+        assert_eq!(truncate_to_char_boundary(&s, 2), "a");
+        // max=1 is a clean ascii boundary.
+        assert_eq!(truncate_to_char_boundary(&s, 1), "a");
+        // max=4 is exactly the end.
+        assert_eq!(truncate_to_char_boundary(&s, 4), s.as_str());
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_regression_byte_102400() {
+        // Reproduces the exact crash: a long ASCII prefix followed by a
+        // multi-byte char straddling byte 102400.
+        let mut s = String::with_capacity(102_500);
+        for _ in 0..102_399 {
+            s.push('a');
+        }
+        s.push('ᥴ'); // 3 bytes at positions 102399..102402
+        for _ in 0..50 {
+            s.push('z');
+        }
+        // 102400 falls inside the multibyte char. Pre-fix this panicked.
+        let truncated = truncate_to_char_boundary(&s, 102_400);
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert_eq!(truncated.len(), 102_399);
+    }
 }
