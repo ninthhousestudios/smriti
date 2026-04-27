@@ -2,64 +2,42 @@
 
 ## Pick up
 
-The new `~/.local/bin/smriti` binary has the UTF-8 panic fix. The user's scan
-against /home/josh should now run to completion (~30+ min, single
-monolithic transaction — see plan below for why and what to do about it).
-
-### Immediate next step (verify)
-
-Re-run the user's scan with the new binary and confirm it commits:
+### 1. Install and test batched scanner on real data
 
 ```bash
-RUST_LOG=smriti=info smriti scan
-# Expect after ~4 min: "walk complete: N files current, M events queued, beginning commit"
-# Expect after ~30 min: "Scan complete in Xms"
-smriti health  # last_scan should now be recent
+cargo install --path . --force
+SMRITI_SCAN_BATCHED=1 RUST_LOG=smriti=info smriti scan
+# Watch for batch progress logs every ~10 batches
+# In another terminal: smriti scan-status
+smriti health
 ```
 
-If it crashes again, capture stderr and look for new panics — there may be
-other latent issues that the old SIGBUS / UTF-8 panic shadowed.
+Compare doc/event counts against a legacy scan (without SMRITI_SCAN_BATCHED).
+If results match, flip the default to batched and delete legacy code.
 
-### Next major work item: scanner refactor
+### 2. Daemon workflow / systemd
 
-Plan: `docs/plans/scanner-batched-commits.md`. Per-batch commits with a
-scan-generation pattern. This is the right structural fix; the patches
-shipped today only stop today's specific crashes. Until this lands, the
-scanner remains a 30-minute all-or-nothing operation that fails any time
-a single file triggers any code path bug.
+The daemon (`smriti daemon`) runs MCP over stdio — designed for editor/agent
+integration, not filesystem watching. It does NOT auto-scan on file changes.
 
-**Inline addition the user approved at plan line 143**: include the
-`smriti scan-status` command (polls `scan_runs WHERE status = 'running'`,
-prints `files_seen / wall_time`) — make it part of the initial implementation,
-not a follow-up.
+Questions to resolve:
+- Should there be a `smriti watch` command that uses inotify/fanotify for
+  incremental updates? (Out of scope per the plan, but the natural next step.)
+- Should `smriti scan` run on a cron/systemd timer (e.g., every 5 min)?
+- Should the daemon be a systemd user service so MCP clients can connect?
 
-Suggested implementation order (each its own commit):
-1. Migration `0002_scan_generations.sql` + run_migrations idempotency check.
-2. New `scan_batched()` function next to `scan()`, gated by
-   `SMRITI_SCAN_BATCHED=1`. Reuse the walk loop; only the commit/diff/event
-   pipeline changes.
-3. Move/copy detection upgrade in finalize txn (requires `events.scan_id`).
-4. `smriti scan-status` CLI command + corresponding MCP tool.
-5. Test on /home/josh end-to-end. Compare doc/event counts vs legacy.
-6. Flip default to batched. Delete legacy code path.
+The daemon is untested on real data. Test it via the MCP stdio protocol.
 
-### Known smaller bugs (not blockers)
+### 3. After batched scan is validated
 
-- `smriti roots remove` accepts non-existent paths silently (e.g.
-  `/home/josh/Downlaods` typo). Should error or warn. Caught yesterday,
-  noted in archived `.handoffs/2026-04-27T04-37-09.md`.
-- `embed_excluded` flag on documents is never set; classification info isn't
-  threaded through to the document insert.
-- Stale FTS entries accumulate when a file's content_hash changes — old FTS
-  row for the superseded hash is not deleted.
+- Flip default: remove the `SMRITI_SCAN_BATCHED` gate, make batched the only path
+- Delete `scan_legacy()` and the dispatch logic in `scan()`
+- Add `scan-status` as an MCP tool (currently CLI only)
 
-### What's solid
+## What's solid
 
-- v0.1 implementation complete: all 8 issues across 5 waves.
-- 57 tests pass (`cargo test`), zero warnings.
-- WAL-checkpoint-on-open prevents the SIGBUS class of crash.
-- char-boundary-safe FTS truncation with 3 regression tests.
-- Migration is idempotent (CREATE IF NOT EXISTS), so re-opening the DB
-  doesn't fail.
-- Daemon (MCP over stdio) and embedding pipeline (BGE-M3, feature-gated) are
-  in but untested on real data.
+- Batched scanner implemented and tested (80 tests pass, 7 new batched tests)
+- Three bug fixes shipped: roots remove validation, embed_excluded threading,
+  stale FTS cleanup
+- Migration 0002 is idempotent (probes column existence before ALTER TABLE)
+- Legacy scan path preserved as fallback behind feature gate
