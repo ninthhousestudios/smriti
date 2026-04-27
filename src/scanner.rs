@@ -18,6 +18,7 @@ use crate::error::Result;
 use crate::hasher;
 use crate::ignore::{hardened_defaults, IgnoreStack, PathClassification, SectionRules};
 use crate::metadata;
+use crate::search;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -184,6 +185,8 @@ pub fn scan(
     let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     // Catalog directories found this scan: path → (total_bytes, file_count).
     let mut catalog_dirs: HashMap<PathBuf, (u64, u64)> = HashMap::new();
+    // Directories classified as Cataloged or Ignored — skip all descendants.
+    let mut skip_subtrees: Vec<PathBuf> = Vec::new();
 
     for root in &config.roots {
         if !root.exists() {
@@ -217,6 +220,13 @@ pub fn scan(
             let is_dir = entry.file_type().is_dir();
             let depth = entry.depth();
 
+            // Skip descendants of cataloged/ignored directories.
+            if skip_subtrees.iter().any(|s| path.starts_with(s) && path != s) {
+                continue;
+            }
+            // Clean up skip_subtrees when we ascend past them.
+            skip_subtrees.retain(|s| path.starts_with(s) || !s.starts_with(path.parent().unwrap_or(path)));
+
             // Manage IgnoreStack depth: pop layers for directories we've left.
             while dir_depth_stack.last().copied().unwrap_or(0) >= depth && !dir_depth_stack.is_empty() {
                 dir_depth_stack.pop();
@@ -241,30 +251,20 @@ pub fn scan(
 
             match classification {
                 PathClassification::Ignored => {
-                    // Skip; if it's a dir, skip the whole subtree.
                     if is_dir {
-                        // WalkDir doesn't have a skip method we can call from the iterator
-                        // without consuming it. We rely on classify catching children too.
-                        // For efficiency we could use into_iter().skip_current_dir() but
-                        // that requires changing the walker type. Acceptable for v0.1.
+                        skip_subtrees.push(path.to_path_buf());
                     }
                     continue;
                 }
 
                 PathClassification::Cataloged if is_dir => {
-                    // Walk the subtree separately to compute total_bytes + file_count.
                     let (total_bytes, file_count) = catalog_subtree(path);
                     catalog_dirs.insert(path.to_path_buf(), (total_bytes, file_count));
-                    // Don't recurse into this dir with the main walk — but WalkDir
-                    // will naturally descend unless we skip. We rely on children being
-                    // classified Cataloged (or Ignored) too via the directory match.
-                    // Tier-2 cataloged dir is recorded; we continue the walk normally
-                    // so children are also seen and skipped if needed.
+                    skip_subtrees.push(path.to_path_buf());
                     continue;
                 }
 
                 PathClassification::Cataloged => {
-                    // File inside a cataloged dir — skip (cataloged at dir level).
                     continue;
                 }
 
@@ -465,8 +465,8 @@ pub fn scan(
 
         if !exists {
             // Extract metadata for new documents (unless large).
-            let (title, summary, topics_json, structure_json, is_binary_doc) = if entry.is_large {
-                (None::<String>, None::<String>, "[]".to_string(), "[]".to_string(), true)
+            let (title, summary, topics_json, structure_json, is_binary_doc, fts_content) = if entry.is_large {
+                (None::<String>, None::<String>, "[]".to_string(), "[]".to_string(), true, None::<String>)
             } else {
                 match std::fs::read(&entry.path) {
                     Ok(content) => {
@@ -481,9 +481,17 @@ pub fn scan(
                                 })
                             }).collect::<Vec<_>>()
                         ).unwrap_or_else(|_| "[]".to_string());
-                        (meta.title, meta.summary, topics_json, structure_json, meta.is_binary)
+                        let fts_content = if !meta.is_binary {
+                            std::str::from_utf8(&content).ok().map(|s| {
+                                let max = config.fts_content_max_bytes as usize;
+                                if s.len() > max { s[..max].to_string() } else { s.to_string() }
+                            })
+                        } else {
+                            None
+                        };
+                        (meta.title, meta.summary, topics_json, structure_json, meta.is_binary, fts_content)
                     }
-                    Err(_) => (None, None, "[]".to_string(), "[]".to_string(), false),
+                    Err(_) => (None, None, "[]".to_string(), "[]".to_string(), false, None),
                 }
             };
 
@@ -509,6 +517,17 @@ pub fn scan(
                     now_str,
                 ],
             )?;
+
+            if !is_binary_doc {
+                search::upsert_fts(
+                    &tx,
+                    &entry.content_hash,
+                    title.as_deref(),
+                    &topics_json,
+                    summary.as_deref(),
+                    fts_content.as_deref(),
+                )?;
+            }
         } else if !entry.body_hash.is_empty() && entry.body_hash != entry.content_hash {
             // Update body_hash for existing documents when we have a new one.
             tx.execute(

@@ -44,6 +44,13 @@ impl SectionRules {
     pub fn is_empty(&self) -> bool {
         self.ignored.is_empty() && self.cataloged.is_empty() && self.no_embed.is_empty()
     }
+
+    /// Build a `SectionRules` with no patterns (matches nothing).
+    pub fn empty() -> Self {
+        let g = |d: &Path| GitignoreBuilder::new(d).build().unwrap();
+        let root = Path::new("/");
+        Self { ignored: g(root), cataloged: g(root), no_embed: g(root) }
+    }
 }
 
 /// Parse a .smritiignore file's content into compiled `SectionRules`.
