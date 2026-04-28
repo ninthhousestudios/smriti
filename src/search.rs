@@ -93,6 +93,114 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
     Ok(SearchResult { results, total_indexed, envelope })
 }
 
+// ---------------------------------------------------------------------------
+// Path search (glob/extension against paths table)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct PathHit {
+    pub path: String,
+    pub byte_size: i64,
+    pub content_hash: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PathSearchResult {
+    pub results: Vec<PathHit>,
+    pub total_matched: usize,
+    #[serde(flatten)]
+    pub envelope: FreshnessEnvelope,
+}
+
+pub fn search_path(
+    conn: &Connection,
+    pattern: &str,
+    config: &Config,
+) -> Result<PathSearchResult> {
+    let envelope = freshness_envelope(conn, config)?;
+
+    let like_pattern = glob_to_like(pattern);
+
+    let mut stmt = conn.prepare(
+        "SELECT p.path, COALESCE(d.byte_size, 0), p.content_hash, d.title
+         FROM paths p
+         JOIN documents d ON d.content_hash = p.content_hash
+         WHERE p.disappeared IS NULL AND p.path LIKE ?1
+         ORDER BY d.byte_size DESC
+         LIMIT 200",
+    )?;
+
+    let mut results = Vec::new();
+    let mut rows = stmt.query(params![like_pattern])?;
+    while let Some(row) = rows.next()? {
+        results.push(PathHit {
+            path: row.get(0)?,
+            byte_size: row.get(1)?,
+            content_hash: row.get(2)?,
+            title: row.get(3)?,
+        });
+    }
+
+    let total_matched = results.len();
+    Ok(PathSearchResult { results, total_matched, envelope })
+}
+
+pub fn search_extension(
+    conn: &Connection,
+    ext: &str,
+    config: &Config,
+) -> Result<PathSearchResult> {
+    let envelope = freshness_envelope(conn, config)?;
+
+    let like_pattern = format!("%.{}", ext.trim_start_matches('.').to_lowercase());
+
+    let mut stmt = conn.prepare(
+        "SELECT p.path, COALESCE(d.byte_size, 0), p.content_hash, d.title
+         FROM paths p
+         JOIN documents d ON d.content_hash = p.content_hash
+         WHERE p.disappeared IS NULL AND LOWER(p.path) LIKE ?1
+         ORDER BY d.byte_size DESC
+         LIMIT 200",
+    )?;
+
+    let mut results = Vec::new();
+    let mut rows = stmt.query(params![like_pattern])?;
+    while let Some(row) = rows.next()? {
+        results.push(PathHit {
+            path: row.get(0)?,
+            byte_size: row.get(1)?,
+            content_hash: row.get(2)?,
+            title: row.get(3)?,
+        });
+    }
+
+    let total_matched = results.len();
+    Ok(PathSearchResult { results, total_matched, envelope })
+}
+
+fn glob_to_like(pattern: &str) -> String {
+    let mut out = String::new();
+    for ch in pattern.chars() {
+        match ch {
+            '*' => out.push('%'),
+            '?' => out.push('_'),
+            '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
+            '~' => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                out.push_str(&home);
+            }
+            _ => out.push(ch),
+        }
+    }
+    if !out.contains('%') && !out.contains('_') {
+        out.insert(0, '%');
+        out.push('%');
+    }
+    out
+}
+
 /// Hybrid search: BM25 + dense retrieval with RRF merge.
 /// Falls back to BM25-only if the embedding feature is disabled or embedder is None.
 #[cfg(feature = "embedding")]

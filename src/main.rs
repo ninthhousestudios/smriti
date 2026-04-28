@@ -40,11 +40,18 @@ enum Commands {
         #[arg(long, default_value = "paths")]
         format: String,
     },
-    /// Search indexed files by content
+    /// Search indexed files by content (default) or by path/extension
     Find {
-        query: String,
+        /// FTS search query (omit if using --path or --ext)
+        query: Option<String>,
         #[arg(short, default_value = "10")]
         k: u32,
+        /// Search by path glob (e.g., "*.iso", "~/Downloads/**")
+        #[arg(long)]
+        path: Option<String>,
+        /// Search by file extension (e.g., .iso)
+        #[arg(long)]
+        ext: Option<String>,
     },
     /// Look up a document by content hash
     Get {
@@ -122,7 +129,7 @@ fn main() -> Result<()> {
         Commands::Scan { paths, jobs } => cmd_scan(&config, paths, jobs)?,
         Commands::Audit { min_bytes, sort_by } => cmd_audit(&config, min_bytes, sort_by)?,
         Commands::Manifest { format } => cmd_manifest(&config, &format)?,
-        Commands::Find { query, k } => cmd_find(&config, &query, k)?,
+        Commands::Find { query, k, path, ext } => cmd_find(&config, query.as_deref(), k, path.as_deref(), ext.as_deref())?,
         Commands::Get { content_hash } => cmd_get(&config, &content_hash)?,
         Commands::History { path, since, until } => cmd_history(&config, &path, since, until)?,
         Commands::Roots { action } => cmd_roots(action)?,
@@ -281,8 +288,20 @@ fn cmd_manifest(config: &Config, format: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_find(config: &Config, query: &str, k: u32) -> Result<()> {
+fn cmd_find(config: &Config, query: Option<&str>, k: u32, path: Option<&str>, ext: Option<&str>) -> Result<()> {
     let conn = smriti::db::open_readonly(&config.db_path)?;
+
+    if let Some(ext) = ext {
+        let result = search::search_extension(&conn, ext, config)?;
+        return print_path_results(&result, &format!("extension .{}", ext.trim_start_matches('.')));
+    }
+
+    if let Some(pattern) = path {
+        let result = search::search_path(&conn, pattern, config)?;
+        return print_path_results(&result, &format!("path {pattern}"));
+    }
+
+    let query = query.ok_or_else(|| anyhow::anyhow!("provide a query, or use --path/--ext"))?;
     let result = search::search_fts(&conn, query, k, config)?;
 
     if result.results.is_empty() {
@@ -302,6 +321,22 @@ fn cmd_find(config: &Config, query: &str, k: u32) -> Result<()> {
             println!("   Topics: {}", hit.topics.join(", "));
         }
         println!();
+    }
+
+    Ok(())
+}
+
+fn print_path_results(result: &search::PathSearchResult, label: &str) -> Result<()> {
+    if result.results.is_empty() {
+        println!("No files matching {label}");
+        return Ok(());
+    }
+
+    let total_bytes: i64 = result.results.iter().map(|h| h.byte_size).sum();
+    println!("Found {} files matching {} ({}):\n", result.total_matched, label, format_bytes(total_bytes));
+    for hit in &result.results {
+        let size = format_bytes(hit.byte_size);
+        println!("  {:<10}  {}", size, hit.path);
     }
 
     Ok(())
