@@ -14,6 +14,7 @@ pub fn open(path: &Path) -> Result<Connection> {
 pub fn open_readonly(path: &Path) -> Result<Connection> {
     let conn = open_connection(path)?;
     conn.pragma_update(None, "query_only", "ON")?;
+    set_pragma(&conn, "wal_autocheckpoint", "0")?;
     Ok(conn)
 }
 
@@ -58,8 +59,10 @@ pub fn enable_scan_pragmas(conn: &Connection) -> Result<()> {
     // 256 MB page cache: hot working set (FTS5 index, paths index, documents)
     // exceeds the previous 64 MB once the DB grows past a few hundred MB.
     set_pragma(conn, "cache_size", "-262144")?;
-    // 1 GiB mmap window: covers the DB file even after substantial growth.
-    set_pragma(conn, "mmap_size", "1073741824")?;
+    // mmap disabled: concurrent reader connections (health, scan-status) can
+    // trigger autocheckpoints that grow the main DB file, invalidating the
+    // writer's mmap window → SIGBUS. The 256 MB page cache is sufficient.
+    set_pragma(conn, "mmap_size", "0")?;
     set_pragma(conn, "temp_store", "2")?;
     // Leave wal_autocheckpoint at the default (1000 pages ~= 4 MB). Disabling
     // it caused the WAL to grow to 700+ MB during long scans, and every insert

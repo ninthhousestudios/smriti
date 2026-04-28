@@ -551,6 +551,10 @@ pub fn manifest(conn: &Connection, format: &str, config: &Config) -> Result<Mani
         "SELECT p.path, p.content_hash, d.byte_size
          FROM paths p JOIN documents d ON d.content_hash = p.content_hash
          WHERE p.disappeared IS NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM catalog c
+               WHERE substr(p.path, 1, length(c.path) + 1) = c.path || '/'
+           )
          ORDER BY p.path",
     )?;
 
