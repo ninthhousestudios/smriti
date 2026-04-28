@@ -2,59 +2,55 @@
 
 ## Pick up
 
-### 1. Check the batched scan results
+### 1. Fix stale WAL/SHM and benchmark full scan on ~
 
-A batched scan (`SMRITI_SCAN_BATCHED=1`) was kicked off on `/home/josh` this
-session. Check whether it completed:
+Josh moved `~/.smriti/index.db` but left the `-wal` and `-shm` files behind,
+causing corruption. Before scanning:
 
 ```bash
-smriti scan-status
-smriti health
+rm ~/.smriti/index.db ~/.smriti/index.db-shm ~/.smriti/index.db-wal
+smriti init
+smriti roots add ~
 ```
 
-If it completed, look at doc/event counts and spot-check a few files with
-`smriti find` and `smriti history`. If it failed, check the error — the DB
-locking fix should have resolved the previous "database is locked" crash.
+Then benchmark the new parallel hashing pipeline:
 
-### 2. Explore smriti for the backup problem
+```bash
+# Full power (all 12 hyperthreads)
+time smriti scan
 
-Josh wants to see if/how smriti can help with his backup situation. Relevant
-commands:
+# Leaving headroom
+time smriti scan -j 4
+```
 
-- `smriti audit` — shows tier 1 (back this up) vs tier 2 (regenerable) breakdown
-  with byte totals
-- `smriti manifest` — exports tier-1 paths for rsync/restic/borg
-- `smriti manifest --format ndjson` — richer output with hashes
+Compare wall time and check `smriti scan-status` / `smriti health` afterward.
 
-Questions to explore:
-- Does the tier 1/2 split match what Josh actually cares about backing up?
-- Are there directories that should be cataloged (tier 2) but aren't in the
-  hardened defaults? Might need a `~/.smritiignore` with `[catalog]` entries.
-- What does the byte breakdown look like? How much is tier 1 vs tier 2?
-- Can `smriti manifest | rsync ...` be a practical backup workflow?
+### 2. Consider guarding against orphaned WAL/SHM
 
-### 3. Decide next steps
+`smriti init` could detect stale `-wal`/`-shm` files when the `.db` is missing
+or empty, and clean them up automatically. Low effort, prevents user confusion.
 
-Based on scan results and backup exploration, decide:
-- Flip batched scanner to default? (delete legacy code)
-- Add a user-level `~/.smritiignore` for Josh's specific setup?
-- Wire up `smriti watch` or a cron/systemd timer for regular scans?
-- Any other features needed for the backup use case?
+### 3. Remaining feature work
 
-## What changed this session
+From the README planned section, in rough priority order:
 
-- **DB locking fix**: `busy_timeout(5s)` added to all connections;
-  `wal_checkpoint(TRUNCATE)` moved from `db::open()` to `db::checkpoint_wal()`
-  called only before scans. Read-only commands no longer contend with active
-  scans.
-- **README.md**: comprehensive project README covering features, commands,
-  config, MCP tools, current state, and planned features.
-- **docs/architecture.md**: module breakdown, data flow diagrams, full schema,
-  concurrency model.
-- **docs/index.md**: updated to include architecture doc.
+- **Parallel walk** — the walk phase is still single-threaded via `walkdir`.
+  Could switch to `ignore::WalkParallel` or `jwalk` for parallel directory
+  traversal. Separate from the hash parallelism already implemented.
+- **`smriti watch`** — inotify/fanotify for incremental updates instead of
+  full rescans. Would make smriti usable as a background service.
+- **systemd user service** — run the daemon as a persistent service.
+- **Hybrid search in CLI/MCP** — `search_hybrid` exists in the codebase but
+  isn't wired to commands yet.
+
+### 4. Explore smriti for the backup problem
+
+Still open from prior session — see if the tier 1/2 split and `smriti manifest`
+can drive Josh's backup workflow. Need a complete scan on ~ first.
 
 ## What's solid
 
-- DB locking fix compiled, installed, scan running with it
-- 80 tests pass (as of last full run)
-- README and architecture docs complete
+- Three-phase scan pipeline: walk → parallel hash (rayon) → batched DB commit
+- `-j/--jobs` flag for thread control
+- 80 tests pass, legacy scanner deleted
+- Binary installed at `~/.cargo/bin/smriti`

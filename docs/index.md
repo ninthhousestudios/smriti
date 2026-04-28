@@ -6,3 +6,5 @@
 - [architecture.md](architecture.md) — System architecture, module responsibilities, data flows, schema.
 - [handoff.md](handoff.md) — Active session handoff and context for next steps.
 - [plans/scanner-batched-commits.md](plans/scanner-batched-commits.md) — Refactor `scanner::scan` from a single monolithic transaction to per-batch commits with a scan-generation pattern.
+- [plans/daemon-triage-usb.md](plans/daemon-triage-usb.md) — Implementation plan for daemon architecture, triage, USB workflow, watcher (6 waves).
+- [daemon-sketch.md](daemon-sketch.md) — Two-process architecture: MCP server (streamable HTTP) + filesystem watcher (inotify). Includes triage UX, USB root workflow, alternatives considered.
