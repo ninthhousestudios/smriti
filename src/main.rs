@@ -88,6 +88,11 @@ enum Commands {
     },
     /// Analyze index and recommend tier reclassifications
     Triage,
+    /// Compare a root against other roots to find redundant, unique, and stale files
+    BackupAudit {
+        /// Root to audit (e.g., /mnt/usb-backup)
+        root: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -135,6 +140,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Triage => cmd_triage(&config)?,
+        Commands::BackupAudit { root } => cmd_backup_audit(&config, &root)?,
     }
 
     Ok(())
@@ -484,6 +490,51 @@ fn cmd_triage(config: &Config) -> Result<()> {
     for msg in &result.messages {
         println!("  {msg}");
     }
+
+    Ok(())
+}
+
+fn cmd_backup_audit(config: &Config, root: &PathBuf) -> Result<()> {
+    let abs_root = abs_path(root)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
+    let report = smriti::backup::analyze(&conn, &abs_root)?;
+
+    if report.total_files == 0 {
+        println!("No files found under root: {}", abs_root.display());
+        println!("(Is this root scanned? Run `smriti roots list` to check.)");
+        return Ok(());
+    }
+
+    let content = smriti::backup::format_audit_file(&report);
+
+    let tmp = tempfile::NamedTempFile::new()?;
+    std::fs::write(tmp.path(), &content)?;
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let status = std::process::Command::new(&editor)
+        .arg(tmp.path())
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("Editor exited with non-zero status");
+    }
+
+    let edited = std::fs::read_to_string(tmp.path())?;
+    let decisions = smriti::backup::parse_audit_file(&edited)?;
+
+    if decisions.is_empty() {
+        println!("No actions to apply.");
+        return Ok(());
+    }
+
+    let result = smriti::backup::apply_audit(&decisions);
+    for msg in &result.messages {
+        println!("{msg}");
+    }
+    println!(
+        "\nSummary: {} redundant, {} kept.",
+        result.redundant_count, result.kept_count
+    );
 
     Ok(())
 }
