@@ -513,6 +513,7 @@ fn scan_batched(
     let mut current_entries: Vec<CurrentEntry> = Vec::with_capacity(walk_entries.len());
     let mut current_hash_to_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut current_inode_to_paths: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut current_path_to_inode: HashMap<PathBuf, u64> = HashMap::new();
 
     for (idx, we) in walk_entries.into_iter().enumerate() {
         let (content_hash, body_hash, short_circuited, doc_info) = if we.needs_hash {
@@ -528,6 +529,7 @@ fn scan_batched(
             .entry(content_hash.clone())
             .or_default()
             .push(we.path.clone());
+        current_path_to_inode.insert(we.path.clone(), we.inode);
         current_inode_to_paths
             .entry(we.inode)
             .or_default()
@@ -656,13 +658,9 @@ fn scan_batched(
                     Some("moved")
                 } else {
                     let entry_path = PathBuf::from(path_str);
-                    let shared_inode = current_inode_to_paths
-                        .get(
-                            &current_inode_to_paths.iter().find_map(|(ino, paths)| {
-                                if paths.contains(&entry_path) { Some(*ino) } else { None }
-                            })
-                            .unwrap_or(0),
-                        )
+                    let shared_inode = current_path_to_inode
+                        .get(&entry_path)
+                        .and_then(|ino| current_inode_to_paths.get(ino))
                         .map(|paths| paths.len() > 1)
                         .unwrap_or(false);
 
