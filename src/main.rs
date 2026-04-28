@@ -546,7 +546,8 @@ fn cmd_scan_status(config: &Config) -> Result<()> {
 
 fn cmd_triage(config: &Config) -> Result<()> {
     let conn = smriti::db::open_readonly(&config.db_path)?;
-    let report = smriti::triage::analyze(&conn)?;
+    let global_rules = load_user_smritiignore();
+    let report = smriti::triage::analyze(&conn, &global_rules)?;
 
     if report.recommendations.is_empty() && report.duplicates.is_empty() {
         println!("No recommendations. Index looks clean.");

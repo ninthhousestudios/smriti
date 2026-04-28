@@ -6,6 +6,7 @@ use rusqlite::Connection;
 
 use crate::config::expand_tilde;
 use crate::error::{Result, SmritiError};
+use crate::ignore::{PathClassification, SectionRules};
 
 fn escape_glob(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -105,6 +106,41 @@ const AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "m4a", "aac", "wav", "opus",
 const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "ts"];
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "heic", "raw", "cr2", "nef"];
 
+fn canonical_score(rules: &SectionRules, path: &Path) -> i32 {
+    let mut score: i32 = 100;
+
+    match rules.classify(path, false) {
+        PathClassification::Cataloged => score -= 50,
+        PathClassification::Ignored => score -= 80,
+        _ => {}
+    }
+
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let lower = name.to_ascii_lowercase();
+        for dir in path.ancestors().skip(1) {
+            if let Some(d) = dir.file_name().and_then(|n| n.to_str()) {
+                let dl = d.to_ascii_lowercase();
+                if REGENERABLE_DIRS.contains(&dl.as_str()) {
+                    score -= 40;
+                    break;
+                }
+                if dl == "downloads" || dl == "tmp" || dl == "temp" {
+                    score -= 30;
+                    break;
+                }
+            }
+        }
+        if lower.contains("backup") || lower.contains("copy") || lower.contains("old") {
+            score -= 20;
+        }
+    }
+
+    let depth = path.components().count() as i32;
+    score -= depth;
+
+    score
+}
+
 fn media_family(ext: &str) -> Option<&'static str> {
     let lower = ext.to_ascii_lowercase();
     if AUDIO_EXTS.contains(&lower.as_str()) {
@@ -135,7 +171,7 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub fn analyze(conn: &Connection) -> Result<TriageReport> {
+pub fn analyze(conn: &Connection, global_rules: &SectionRules) -> Result<TriageReport> {
     let (total_files, total_bytes) = {
         let mut stmt = conn.prepare(
             "SELECT COUNT(*), COALESCE(SUM(d.byte_size), 0) \
@@ -288,7 +324,13 @@ pub fn analyze(conn: &Connection) -> Result<TriageReport> {
 
     recommendations.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
 
-    let duplicates = query_duplicates(conn)?;
+    let mut duplicates = query_duplicates(conn)?;
+
+    for group in &mut duplicates {
+        group.paths.sort_by(|a, b| {
+            canonical_score(global_rules, b).cmp(&canonical_score(global_rules, a))
+        });
+    }
 
     Ok(TriageReport {
         recommendations,

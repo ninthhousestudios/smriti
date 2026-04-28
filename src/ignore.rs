@@ -51,6 +51,10 @@ impl SectionRules {
         let root = Path::new("/");
         Self { ignored: g(root), cataloged: g(root), no_embed: g(root) }
     }
+
+    pub fn classify(&self, path: &Path, is_dir: bool) -> PathClassification {
+        classify_against(self, path, is_dir).unwrap_or(PathClassification::Indexed)
+    }
 }
 
 /// Parse a .smritiignore file's content into compiled `SectionRules`.
