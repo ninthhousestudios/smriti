@@ -194,36 +194,33 @@ pub fn analyze(conn: &Connection) -> Result<TriageReport> {
         }
 
         if REGENERABLE_DIRS.contains(&dir_name.as_str()) {
-            if let Some(parent) = dir.parent() {
-                let has_manifest = BUILD_MANIFESTS
-                    .iter()
-                    .any(|m| parent.join(m).exists());
+            let manifest = dir.parent().and_then(|parent| {
+                BUILD_MANIFESTS.iter().find(|m| parent.join(m).exists())
+            });
 
-                if has_manifest {
-                    let manifest = BUILD_MANIFESTS
-                        .iter()
-                        .find(|m| parent.join(m).exists())
-                        .unwrap();
-                    let reason = match dir_name.as_str() {
-                        "target" => format!("cargo build output ({manifest} in parent)"),
-                        "node_modules" => format!("npm dependency cache ({manifest} in parent)"),
-                        "__pycache__" => format!("python bytecode cache ({manifest} in parent)"),
-                        "venv" | ".venv" => format!("python venv ({manifest} in parent)"),
-                        ".gradle" => format!("gradle cache ({manifest} in parent)"),
-                        ".m2" => format!("maven cache ({manifest} in parent)"),
-                        "vendor" => format!("vendored dependencies ({manifest} in parent)"),
-                        _ => format!("build output ({manifest} in parent)"),
-                    };
-                    seen_dirs.insert(dir.clone());
-                    recommendations.push(Recommendation {
-                        path: dir.clone(),
-                        suggested_action: Action::Catalog,
-                        reason,
-                        size_bytes: *total_size,
-                        file_count: Some(*file_count),
-                    });
-                    continue;
-                }
+            let reason = match (dir_name.as_str(), manifest) {
+                ("target", Some(m)) => Some(format!("cargo build output ({m} in parent)")),
+                ("node_modules", Some(m)) => Some(format!("npm dependency cache ({m} in parent)")),
+                (".gradle", Some(m)) => Some(format!("gradle cache ({m} in parent)")),
+                (".m2", Some(m)) => Some(format!("maven cache ({m} in parent)")),
+                ("vendor", Some(m)) => Some(format!("vendored dependencies ({m} in parent)")),
+                ("venv" | ".venv", Some(m)) => Some(format!("python venv ({m} in parent)")),
+                ("venv" | ".venv", None) => Some("python venv".to_string()),
+                ("__pycache__", _) => Some("python bytecode cache".to_string()),
+                (_, Some(m)) => Some(format!("build output ({m} in parent)")),
+                _ => None,
+            };
+
+            if let Some(reason) = reason {
+                seen_dirs.insert(dir.clone());
+                recommendations.push(Recommendation {
+                    path: dir.clone(),
+                    suggested_action: Action::Catalog,
+                    reason,
+                    size_bytes: *total_size,
+                    file_count: Some(*file_count),
+                });
+                continue;
             }
         }
 
@@ -353,7 +350,9 @@ pub fn format_triage_file(report: &TriageReport) -> String {
             let canonical = path_display(&group.paths[0]);
             for path in &group.paths {
                 let path_str = path_display(path);
-                let dup_of = if path == &group.paths[0] {
+                let is_canonical = path == &group.paths[0];
+                let action = if is_canonical { "keep" } else { "catalog" };
+                let dup_of = if is_canonical {
                     "(canonical)".to_string()
                 } else {
                     canonical.clone()
@@ -361,7 +360,7 @@ pub fn format_triage_file(report: &TriageReport) -> String {
                 let _ = writeln!(
                     out,
                     "{:<10}  {:<48}  {:<10}  {}",
-                    "keep",
+                    action,
                     path_str,
                     size_str,
                     dup_of,

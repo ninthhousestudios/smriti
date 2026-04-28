@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -155,6 +155,23 @@ fn cmd_init(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn load_user_smritiignore() -> SectionRules {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let path = Path::new(&home).join(".smritiignore");
+    if path.is_file() {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                match smriti::ignore::parse_smritiignore(&content, Path::new(&home)) {
+                    Ok(rules) => return rules,
+                    Err(e) => eprintln!("Warning: failed to parse ~/.smritiignore: {e}"),
+                }
+            }
+            Err(e) => eprintln!("Warning: failed to read ~/.smritiignore: {e}"),
+        }
+    }
+    SectionRules::empty()
+}
+
 fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<usize>) -> Result<()> {
     if let Some(j) = jobs {
         rayon::ThreadPoolBuilder::new()
@@ -176,7 +193,7 @@ fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<us
 
     let mut conn = smriti::db::open(&config.db_path)?;
     smriti::db::checkpoint_wal(&conn)?;
-    let global_rules = SectionRules::empty();
+    let global_rules = load_user_smritiignore();
     let result = smriti::scanner::scan(&mut conn, &scan_config, &global_rules)?;
 
     println!("Scan complete in {}ms", result.duration_ms);
@@ -468,10 +485,13 @@ fn cmd_triage(config: &Config) -> Result<()> {
     let tmp = tempfile::NamedTempFile::new()?;
     std::fs::write(tmp.path(), &content)?;
 
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
     let status = std::process::Command::new(&editor)
         .arg(tmp.path())
-        .status()?;
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to launch editor '{}': {}", editor, e))?;
 
     if !status.success() {
         anyhow::bail!("Editor exited with non-zero status");
@@ -510,10 +530,13 @@ fn cmd_backup_audit(config: &Config, root: &PathBuf) -> Result<()> {
     let tmp = tempfile::NamedTempFile::new()?;
     std::fs::write(tmp.path(), &content)?;
 
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
     let status = std::process::Command::new(&editor)
         .arg(tmp.path())
-        .status()?;
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to launch editor '{}': {}", editor, e))?;
 
     if !status.success() {
         anyhow::bail!("Editor exited with non-zero status");
