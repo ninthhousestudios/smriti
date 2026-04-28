@@ -6,8 +6,18 @@ use rusqlite::{Connection, ffi::sqlite3_auto_extension};
 use crate::error::{Result, SmritiError};
 
 pub fn open(path: &Path) -> Result<Connection> {
-    // sqlite-vec must be registered before the connection is opened so it
-    // applies to this and all subsequent connections in the process.
+    let conn = open_connection(path)?;
+    run_migrations(&conn)?;
+    Ok(conn)
+}
+
+pub fn open_readonly(path: &Path) -> Result<Connection> {
+    let conn = open_connection(path)?;
+    conn.pragma_update(None, "query_only", "ON")?;
+    Ok(conn)
+}
+
+fn open_connection(path: &Path) -> Result<Connection> {
     unsafe {
         sqlite3_auto_extension(Some(std::mem::transmute(
             sqlite_vec::sqlite3_vec_init as *const (),
@@ -23,11 +33,8 @@ pub fn open(path: &Path) -> Result<Connection> {
         Connection::open(path)?
     };
 
-    // PRAGMA journal_mode returns a row, so we must use pragma_update_and_check.
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-
-    run_migrations(&conn)?;
 
     Ok(conn)
 }

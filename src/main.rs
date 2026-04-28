@@ -176,7 +176,7 @@ fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<us
 }
 
 fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>) -> Result<()> {
-    let conn = smriti::db::open(&config.db_path)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
     let mut audit_config = config.clone();
     audit_config.roots = roots::load_roots(config)?;
 
@@ -234,7 +234,7 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>) -
 }
 
 fn cmd_manifest(config: &Config, format: &str) -> Result<()> {
-    let conn = smriti::db::open(&config.db_path)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
     let result = search::manifest(&conn, format, config)?;
 
     for entry in &result.entries {
@@ -245,7 +245,7 @@ fn cmd_manifest(config: &Config, format: &str) -> Result<()> {
 }
 
 fn cmd_find(config: &Config, query: &str, k: u32) -> Result<()> {
-    let conn = smriti::db::open(&config.db_path)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
     let result = search::search_fts(&conn, query, k, config)?;
 
     if result.results.is_empty() {
@@ -271,7 +271,7 @@ fn cmd_find(config: &Config, query: &str, k: u32) -> Result<()> {
 }
 
 fn cmd_get(config: &Config, content_hash: &str) -> Result<()> {
-    let conn = smriti::db::open(&config.db_path)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
     let doc = search::get_document(&conn, content_hash, config)?;
 
     let title = doc.title.as_deref().unwrap_or("(untitled)");
@@ -300,7 +300,7 @@ fn cmd_get(config: &Config, content_hash: &str) -> Result<()> {
 }
 
 fn cmd_history(config: &Config, path: &str, since: Option<String>, until: Option<String>) -> Result<()> {
-    let conn = smriti::db::open(&config.db_path)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
     let result = search::history(&conn, path, since.as_deref(), until.as_deref(), config)?;
 
     if let Some(ref current) = result.current_path {
@@ -388,7 +388,7 @@ fn cmd_prune(config: &Config, older_than: Option<String>) -> Result<()> {
 }
 
 fn cmd_health(config: &Config) -> Result<()> {
-    let conn = smriti::db::open(&config.db_path)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
     let result = search::health(&conn, config)?;
 
     println!("Status:    {}", result.status);
@@ -413,7 +413,7 @@ fn cmd_health(config: &Config) -> Result<()> {
 }
 
 fn cmd_scan_status(config: &Config) -> Result<()> {
-    let conn = smriti::db::open(&config.db_path)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
     match smriti::scanner::scan_status(&conn)? {
         Some(status) => {
             println!("Scan #{}", status.id);
@@ -435,7 +435,7 @@ fn cmd_scan_status(config: &Config) -> Result<()> {
 }
 
 fn cmd_triage(config: &Config) -> Result<()> {
-    let conn = smriti::db::open(&config.db_path)?;
+    let conn = smriti::db::open_readonly(&config.db_path)?;
     let report = smriti::triage::analyze(&conn)?;
 
     if report.recommendations.is_empty() && report.duplicates.is_empty() {
