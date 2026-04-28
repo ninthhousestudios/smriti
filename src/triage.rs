@@ -7,6 +7,21 @@ use rusqlite::Connection;
 use crate::config::expand_tilde;
 use crate::error::{Result, SmritiError};
 
+fn escape_glob(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '*' | '?' | '[' | ']' | '{' | '}' | '\\' => {
+                out.push('[');
+                out.push(c);
+                out.push(']');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub struct Recommendation {
     pub path: PathBuf,
     pub suggested_action: Action,
@@ -428,11 +443,11 @@ pub fn apply_triage(decisions: &[(Action, PathBuf)]) -> Result<ApplyResult> {
         match action {
             Action::Keep => {}
             Action::Ignore => {
-                let s = path_display(path);
+                let s = escape_glob(&path_display(path));
                 ignore_entries.push(s);
             }
             Action::Catalog => {
-                let s = path_display(path);
+                let s = escape_glob(&path_display(path));
                 catalog_entries.push(s);
             }
         }
