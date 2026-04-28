@@ -1,7 +1,6 @@
-//! Daemon entry point: runs the MCP server over stdio.
-//!
-//! v0.1 uses stdio transport (MCP subprocess pattern).
-//! Unix socket transport for long-lived daemon is planned for v0.2.
+//! Daemon entry point: runs the MCP server over stdio or streamable HTTP.
+
+use std::sync::{Arc, Mutex};
 
 use rmcp::ServiceExt;
 
@@ -10,11 +9,103 @@ use crate::mcp::SmritiServer;
 
 pub async fn run_stdio(config: Config) -> anyhow::Result<()> {
     let conn = crate::db::open(&config.db_path)?;
-    let server = SmritiServer::new(conn, config);
+    let db = Arc::new(Mutex::new(conn));
+    let cfg = Arc::new(config);
+    let server = SmritiServer::new(db, cfg);
 
     let transport = rmcp::transport::stdio();
     let service = server.serve(transport).await?;
     service.waiting().await?;
 
     Ok(())
+}
+
+pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<()> {
+    use axum::routing::any_service;
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager,
+        tower::{StreamableHttpServerConfig, StreamableHttpService},
+    };
+    use tokio_util::sync::CancellationToken;
+
+    let conn = crate::db::open(&config.db_path)?;
+    let db = Arc::new(Mutex::new(conn));
+    let cfg = Arc::new(config);
+
+    let cancel = CancellationToken::new();
+
+    let http_config = StreamableHttpServerConfig::default()
+        .with_cancellation_token(cancel.clone());
+
+    let session_manager = Arc::new(LocalSessionManager::default());
+
+    let db_clone = Arc::clone(&db);
+    let cfg_clone = Arc::clone(&cfg);
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(SmritiServer::new(Arc::clone(&db_clone), Arc::clone(&cfg_clone))),
+        session_manager,
+        http_config,
+    );
+
+    // rmcp requires Accept to contain both application/json and text/event-stream,
+    // but some clients (e.g. Claude Code) omit it. Normalize before rmcp sees it.
+    let normalize_accept = axum::middleware::from_fn(
+        |mut req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| async move {
+            use axum::http::header::ACCEPT;
+            let dominated = req
+                .headers()
+                .get(ACCEPT)
+                .and_then(|v| v.to_str().ok())
+                .is_none_or(|v| {
+                    !v.contains("application/json") || !v.contains("text/event-stream")
+                });
+            if dominated {
+                req.headers_mut().insert(
+                    ACCEPT,
+                    "application/json, text/event-stream".parse().unwrap(),
+                );
+            }
+            next.run(req).await
+        },
+    );
+
+    #[allow(deprecated)]
+    let app = axum::Router::new()
+        .route("/mcp", any_service(mcp_service))
+        .layer(normalize_accept);
+
+    let addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to bind {addr}: {e} — is the port in use?"))?;
+    tracing::info!(%addr, "smriti HTTP MCP server listening");
+
+    let cancel_for_shutdown = cancel.clone();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            tracing::info!("shutdown signal received, draining connections");
+            cancel_for_shutdown.cancel();
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("HTTP server exited with error: {e}"))?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    tokio::select! {
+        _ = int.recv() => {}
+        _ = term.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    // Non-Unix fallback: Ctrl-C only.
+    let _ = tokio::signal::ctrl_c().await;
 }

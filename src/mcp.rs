@@ -102,10 +102,10 @@ pub struct ManifestParams {
 
 #[tool_router]
 impl SmritiServer {
-    pub fn new(conn: Connection, config: Config) -> Self {
+    pub fn new(db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
         Self {
-            db: Arc::new(Mutex::new(conn)),
-            config: Arc::new(config),
+            db,
+            config,
             tool_router: Self::tool_router(),
         }
     }

@@ -26,10 +26,11 @@ ignore = "0.4"
 rayon = "1"
 
 # MCP protocol
-rmcp = { version = "1", features = ["server", "transport-io", "macros", "schemars"] }
+rmcp = { version = "1", features = ["server", "transport-io", "macros", "schemars", "transport-streamable-http-server"] }
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-std", "net", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Embedding (optional via feature)
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "ndarray"], optional = true }
@@ -63,14 +64,14 @@ schemars = { version = "1", features = ["chrono04"] }
 # Tempfile for editor-based workflows
 tempfile = "3"
 
-# HTTP transport (optional)
-axum = { version = "0.8", optional = true }
-tower-http = { version = "0.6", features = ["auth"], optional = true }
+# HTTP transport
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["auth"] }
 
 [features]
 default = []
 embedding = ["ort", "tokenizers", "ndarray"]
-http = ["axum", "tower-http"]
 
 [dev-dependencies]
 tempfile = "3"

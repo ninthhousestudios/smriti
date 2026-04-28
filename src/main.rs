@@ -74,8 +74,18 @@ enum Commands {
     Health,
     /// Show status of the most recent scan run
     ScanStatus,
-    /// Run the background daemon (Wave 5)
-    Daemon,
+    /// Run the MCP server
+    Serve {
+        /// Port to listen on (default: 7333)
+        #[arg(short, long, default_value = "7333")]
+        port: u16,
+        /// Host to bind to (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Use stdio transport instead of HTTP
+        #[arg(long)]
+        stdio: bool,
+    },
     /// Analyze index and recommend tier reclassifications
     Triage,
 }
@@ -114,11 +124,15 @@ fn main() -> Result<()> {
         Commands::Prune { older_than, .. } => cmd_prune(&config, older_than)?,
         Commands::Health => cmd_health(&config)?,
         Commands::ScanStatus => cmd_scan_status(&config)?,
-        Commands::Daemon => {
-            tokio::runtime::Builder::new_multi_thread()
+        Commands::Serve { port, host, stdio } => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .build()?
-                .block_on(smriti::daemon::run_stdio(config))?;
+                .build()?;
+            if stdio {
+                rt.block_on(smriti::daemon::run_stdio(config))?;
+            } else {
+                rt.block_on(smriti::daemon::run_http(config, &host, port))?;
+            }
         }
         Commands::Triage => cmd_triage(&config)?,
     }
