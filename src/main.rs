@@ -24,6 +24,9 @@ enum Commands {
     Scan {
         #[arg(long)]
         paths: Option<Vec<PathBuf>>,
+        /// Max parallel hash threads (default: all cores)
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// Show backup audit report
     Audit {
@@ -97,7 +100,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init => cmd_init(&config)?,
-        Commands::Scan { paths } => cmd_scan(&config, paths)?,
+        Commands::Scan { paths, jobs } => cmd_scan(&config, paths, jobs)?,
         Commands::Audit { min_bytes, sort_by } => cmd_audit(&config, min_bytes, sort_by)?,
         Commands::Manifest { format } => cmd_manifest(&config, &format)?,
         Commands::Find { query, k } => cmd_find(&config, &query, k)?,
@@ -127,7 +130,14 @@ fn cmd_init(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>) -> Result<()> {
+fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<usize>) -> Result<()> {
+    if let Some(j) = jobs {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(j)
+            .build_global()
+            .ok();
+    }
+
     let mut scan_config = config.clone();
     if let Some(paths) = filter_paths {
         scan_config.roots = paths;
@@ -140,6 +150,7 @@ fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>) -> Result<()> {
     scan_config.roots = effective_roots;
 
     let mut conn = smriti::db::open(&config.db_path)?;
+    smriti::db::checkpoint_wal(&conn)?;
     let global_rules = SectionRules::empty();
     let result = smriti::scanner::scan(&mut conn, &scan_config, &global_rules)?;
 
