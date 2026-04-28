@@ -96,6 +96,9 @@ pub struct ManifestParams {
     pub format: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct HealthParams {}
+
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
@@ -312,7 +315,7 @@ impl SmritiServer {
     }
 
     #[tool(description = "Health check: database status, roots, last scan time, embedder availability.")]
-    async fn smriti_health(&self, #[allow(unused)] Parameters(_p): Parameters<()>) -> String {
+    async fn smriti_health(&self, #[allow(unused)] Parameters(_p): Parameters<HealthParams>) -> String {
         let conn = self.db.lock().unwrap();
         match search::health(&conn, &self.config) {
             Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}")),
