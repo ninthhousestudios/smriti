@@ -28,16 +28,11 @@ fn empty_rules(base: &Path) -> SectionRules {
     smriti::ignore::parse_smritiignore("", base).expect("empty rules")
 }
 
-fn enable_batched() {
-    std::env::set_var("SMRITI_SCAN_BATCHED", "1");
-}
-
 // ---------------------------------------------------------------------------
 // test_batched_new_files — basic smoke test
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_new_files() {
-    enable_batched();
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -67,7 +62,7 @@ fn test_batched_new_files() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_deleted_files() {
-    enable_batched();
+
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -93,7 +88,7 @@ fn test_batched_deleted_files() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_mid_scan_visibility() {
-    enable_batched();
+
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -129,7 +124,7 @@ fn test_batched_mid_scan_visibility() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_move_detection() {
-    enable_batched();
+
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -163,7 +158,7 @@ fn test_batched_move_detection() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_rerun_after_normal_scan() {
-    enable_batched();
+
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -193,7 +188,7 @@ fn test_batched_rerun_after_normal_scan() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_scan_runs_recorded() {
-    enable_batched();
+
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -222,7 +217,7 @@ fn test_batched_scan_runs_recorded() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_update_detection() {
-    enable_batched();
+
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 

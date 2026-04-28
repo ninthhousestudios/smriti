@@ -90,6 +90,21 @@ pub fn hash_body(content: &[u8]) -> String {
     hash_content(body)
 }
 
+/// Read a file once and compute both content_hash and body_hash.
+/// For large files (above `max_metadata_bytes`), streams the content hash
+/// and returns it as the body hash too (no frontmatter split).
+pub fn hash_file_and_body(path: &Path, is_large: bool) -> Result<(String, String)> {
+    if is_large {
+        let content_hash = hash_file(path)?;
+        Ok((content_hash.clone(), content_hash))
+    } else {
+        let content = std::fs::read(path).map_err(SmritiError::Io)?;
+        let content_hash = hash_content(&content);
+        let body_hash = hash_body(&content);
+        Ok((content_hash, body_hash))
+    }
+}
+
 /// Returns `true` when a frontmatter-only edit occurred:
 /// content hashes differ, but body hashes are identical.
 pub fn detect_minor_change(
