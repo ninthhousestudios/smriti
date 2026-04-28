@@ -28,14 +28,19 @@ operating system.
   `.ssh/`, `.gnupg/`, browser auth stores, and more.
 - **Backup manifest** — `smriti manifest` exports tier-1 paths for rsync,
   restic, borg, or any tool that takes a file list.
-- **MCP server** — `smriti daemon` runs a Model Context Protocol server over
-  stdio for editor and AI agent integration. All queries go through a privacy
-  gate with a read audit log.
+- **Triage** — `smriti triage` analyzes your index and recommends what to
+  reclassify (regenerable build dirs, large media dirs, duplicates). Opens
+  recommendations in your `$EDITOR` for you to accept or modify.
+- **Backup audit** — `smriti backup-audit /mnt/usb` compares a root against
+  your other roots to find redundant, unique, and stale files.
+- **MCP server** — `smriti serve` runs a streamable HTTP MCP server for editor
+  and AI agent integration. All queries go through a privacy gate with a read
+  audit log.
 
 ## What it doesn't do
 
-- **No daemon/watcher (yet)** — smriti scans on demand. There is no file
-  watcher or background service that reacts to changes in real time.
+- **No file watcher (yet)** — smriti scans on demand. There is no inotify
+  watcher that reacts to changes in real time (planned).
 - **No cloud sync** — everything is local. The SQLite database lives on your
   machine.
 - **No content storage** — smriti indexes metadata and hashes; it does not copy
@@ -75,8 +80,14 @@ smriti find "rust error handling"
 # Check what you should back up
 smriti audit
 
+# Let smriti recommend what to reclassify
+smriti triage
+
 # Export a file list for your backup tool
 smriti manifest | rsync -av --files-from=- / /mnt/backup/
+
+# Start the MCP server
+smriti serve
 ```
 
 ## Commands
@@ -84,17 +95,86 @@ smriti manifest | rsync -av --files-from=- / /mnt/backup/
 | Command | Description |
 |---------|-------------|
 | `smriti init` | Create the database and config directory |
-| `smriti scan [--paths <path>...]` | Scan allowlisted roots (or specific subtrees) |
+| `smriti scan [--paths <path>...] [-j N]` | Scan allowlisted roots (or specific subtrees) |
 | `smriti scan-status` | Show status of the most recent scan |
 | `smriti find <query> [-k <n>]` | Full-text search (default k=10) |
 | `smriti get <content_hash>` | Look up a document by its BLAKE3 hash |
 | `smriti history <path>` | Show lifecycle events for a file |
 | `smriti audit [--min-bytes <n>]` | Backup audit: tier 1 vs tier 2 breakdown |
 | `smriti manifest [--format paths\|ndjson]` | Export tier-1 paths for backup tools |
-| `smriti roots add/remove/list` | Manage allowlisted roots |
+| `smriti triage` | Analyze index, recommend reclassifications in `$EDITOR` |
+| `smriti backup-audit <root>` | Compare a root against others for redundancy |
+| `smriti roots add/remove/enable/disable/list` | Manage allowlisted roots |
 | `smriti prune [--older-than <duration>]` | Clean up old events (default: 30 days) |
 | `smriti health` | Database status, roots, last scan |
-| `smriti daemon` | Run the MCP server over stdio |
+| `smriti serve [--port N] [--host H] [--stdio]` | Run the MCP server (HTTP default, port 7333) |
+
+## Root management
+
+Roots are the directories smriti is allowed to index. Nothing is scanned until
+you explicitly add a root.
+
+```bash
+smriti roots add ~/Documents
+smriti roots add /mnt/usb-backup
+
+# Temporarily exclude a root (e.g., unmounted USB) without losing index data
+smriti roots disable /mnt/usb-backup
+
+# Re-enable when the drive is plugged back in
+smriti roots enable /mnt/usb-backup
+
+smriti roots list
+# [enabled]  /home/josh/Documents
+# [disabled] /mnt/usb-backup
+```
+
+Disabled roots are skipped during scans but their index data is preserved.
+Search still returns results from disabled roots (marked as stale).
+
+## Triage
+
+`smriti triage` analyzes your index and opens recommendations in `$EDITOR`:
+
+```
+# ACTION    PATH                                     SIZE        REASON
+catalog     ~/code/bigproject/target/                 12.3 GB     cargo build output
+catalog     ~/code/webapp/node_modules/               4.1 GB      npm dependency cache
+keep        ~/Music/                                  89.2 GB     large dir, 98% audio
+
+# DUPLICATES — same content at multiple paths
+# ACTION    PATH                                     SIZE        DUPLICATE OF
+keep        ~/Desktop/report-v2.pdf                   14 MB      ~/Documents/report-v2.pdf
+```
+
+Edit the ACTION column (`catalog`, `ignore`, or `keep`), save, and smriti
+applies the changes to your `.smritiignore`. Heuristics detect:
+
+- Regenerable build directories (`target/`, `node_modules/`, `.cache/`, etc.)
+- Large homogeneous media directories (>90% same type, >1 GB)
+- XDG cache and trash directories
+- Content duplicates (same BLAKE3 hash at multiple paths)
+
+## Backup audit (USB / removable drives)
+
+Compare a backup root against your live roots:
+
+```bash
+# Plug in the USB, add and scan it
+smriti roots add /mnt/usb-backup
+smriti scan
+
+# See what's redundant, unique, or stale
+smriti backup-audit /mnt/usb-backup
+
+# When done, disable it before unplugging
+smriti roots disable /mnt/usb-backup
+```
+
+The audit classifies files as:
+- **Redundant** — same content hash exists on a live root (safe to delete)
+- **Unique** — exists only on the backup (keep or decide)
+- **Stale** — same relative path elsewhere with newer content
 
 ## Configuration
 
@@ -136,7 +216,15 @@ Place them in any directory under a root. They apply to that subtree, just like
 
 ## MCP server
 
-`smriti daemon` exposes these tools over MCP stdio:
+`smriti serve` starts a streamable HTTP MCP server on `127.0.0.1:7333`:
+
+```bash
+smriti serve                              # default: HTTP on port 7333
+smriti serve --port 8080 --host 0.0.0.0   # custom bind
+smriti serve --stdio                      # stdio transport (subprocess mode)
+```
+
+### Tools
 
 | Tool | Description |
 |------|-------------|
@@ -155,27 +243,55 @@ Every response includes a freshness envelope (`as_of`, `is_stale`).
 `smriti_read` is the intended file access point for AI agents — it enforces
 allowlist rules and logs every access.
 
+### Client configuration
+
+**Claude Code** (`~/.claude/settings.json`):
+```json
+"smriti": {
+  "type": "http",
+  "url": "http://127.0.0.1:7333/mcp"
+}
+```
+
+**Gemini** (`~/.gemini/settings.json`):
+```json
+"smriti": {
+  "url": "http://127.0.0.1:7333/mcp"
+}
+```
+
+**OpenCode** (`~/.config/opencode/opencode.json`):
+```json
+"smriti": {
+  "type": "remote",
+  "url": "http://127.0.0.1:7333/mcp",
+  "enabled": true
+}
+```
+
 ## Current state (v0.2.0)
 
 **Working:**
 - Full scanner with mtime+size short-circuit, move/copy/hardlink detection
+- Parallel hashing via rayon (`-j` flag for thread control)
 - Two-tier classification with `.smritiignore` support
 - BLAKE3 content hashing with body-hash for minor change detection
 - FTS5 BM25 search
 - All CLI commands and MCP tools listed above
 - Privacy gate with read audit logging
-- Batched scanner with parallel hashing via rayon
+- Streamable HTTP MCP server
+- Root enable/disable for removable media
+- Triage command with editor-based UX
+- Backup audit for comparing roots
 
 **Feature-gated:**
 - Dense embeddings via BGE-M3 ONNX (`--features embedding` + `SMRITI_MODEL_PATH`)
-- HTTP transport for the daemon (`--features http`)
 
-## Planned / potential
+## Planned
 
-- **Parallel walk** — parallelize the directory walk (currently single-threaded via walkdir)
 - **`smriti watch`** — inotify/fanotify for incremental updates instead of
   full rescans
-- **systemd user service** — run the daemon as a persistent service
+- **systemd user service** — run the server and watcher as persistent services
 - **Hybrid search in CLI/MCP** — `search_hybrid` (BM25 + dense, RRF merge)
   exists in the codebase but isn't wired to commands yet
 - **Content blob store + revert** — store file versions, enable rollback
