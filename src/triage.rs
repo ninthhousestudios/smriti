@@ -400,28 +400,75 @@ pub fn format_triage_file(report: &TriageReport) -> String {
         let _ = writeln!(out);
         let _ = writeln!(out, "# DUPLICATES — same content at multiple paths");
         let _ = writeln!(out, "# {:<10}  {:<48}  {:<10}  {}", "ACTION", "PATH", "SIZE", "DUPLICATE OF");
-        let _ = writeln!(out);
+
+        let mut dir_pairs: HashMap<(PathBuf, PathBuf), Vec<&DuplicateGroup>> = HashMap::new();
+        let mut individual: Vec<&DuplicateGroup> = Vec::new();
 
         for group in &report.duplicates {
-            let size_str = format_bytes(group.size_bytes);
-            let canonical = path_display(&group.paths[0]);
-            for path in &group.paths {
-                let path_str = path_display(path);
-                let is_canonical = path == &group.paths[0];
-                let action = if is_canonical { "keep" } else { "catalog" };
-                let dup_of = if is_canonical {
-                    "(canonical)".to_string()
-                } else {
-                    canonical.clone()
-                };
+            if group.paths.len() == 2 {
+                if let (Some(a), Some(b)) = (group.paths[0].parent(), group.paths[1].parent()) {
+                    let key = if a <= b {
+                        (a.to_path_buf(), b.to_path_buf())
+                    } else {
+                        (b.to_path_buf(), a.to_path_buf())
+                    };
+                    dir_pairs.entry(key).or_default().push(group);
+                    continue;
+                }
+            }
+            individual.push(group);
+        }
+
+        let mut collapsed: Vec<(PathBuf, PathBuf, u64, usize)> = Vec::new();
+        for ((dir_a, dir_b), groups) in &dir_pairs {
+            if groups.len() >= 3 {
+                let total: u64 = groups.iter().map(|g| g.size_bytes).sum();
+                collapsed.push((dir_a.clone(), dir_b.clone(), total, groups.len()));
+            } else {
+                individual.extend(groups.iter());
+            }
+        }
+        collapsed.sort_by(|a, b| b.2.cmp(&a.2));
+
+        if !collapsed.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "# Directory duplicates (files with same content in both dirs)");
+            for (canonical_dir, dup_dir, total, count) in &collapsed {
                 let _ = writeln!(
                     out,
-                    "{:<10}  {:<48}  {:<10}  {}",
-                    action,
-                    path_str,
-                    size_str,
-                    dup_of,
+                    "{:<10}  {:<48}  {:<10}  duplicates {} ({} files)",
+                    "catalog",
+                    path_display(dup_dir),
+                    format_bytes(*total),
+                    path_display(canonical_dir),
+                    count,
                 );
+            }
+        }
+
+        if !individual.is_empty() {
+            let _ = writeln!(out);
+            for group in &individual {
+                let size_str = format_bytes(group.size_bytes);
+                let canonical = path_display(&group.paths[0]);
+                for path in &group.paths {
+                    let path_str = path_display(path);
+                    let is_canonical = path == &group.paths[0];
+                    let action = if is_canonical { "keep" } else { "catalog" };
+                    let dup_of = if is_canonical {
+                        "(canonical)".to_string()
+                    } else {
+                        canonical.clone()
+                    };
+                    let _ = writeln!(
+                        out,
+                        "{:<10}  {:<48}  {:<10}  {}",
+                        action,
+                        path_str,
+                        size_str,
+                        dup_of,
+                    );
+                }
             }
         }
     }
