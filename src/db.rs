@@ -55,10 +55,17 @@ pub fn checkpoint_wal_passive(conn: &Connection) -> Result<()> {
 
 pub fn enable_scan_pragmas(conn: &Connection) -> Result<()> {
     set_pragma(conn, "synchronous", "NORMAL")?;
-    set_pragma(conn, "cache_size", "-64000")?;
-    set_pragma(conn, "mmap_size", "268435456")?;
+    // 256 MB page cache: hot working set (FTS5 index, paths index, documents)
+    // exceeds the previous 64 MB once the DB grows past a few hundred MB.
+    set_pragma(conn, "cache_size", "-262144")?;
+    // 1 GiB mmap window: covers the DB file even after substantial growth.
+    set_pragma(conn, "mmap_size", "1073741824")?;
     set_pragma(conn, "temp_store", "2")?;
-    set_pragma(conn, "wal_autocheckpoint", "0")?;
+    // Leave wal_autocheckpoint at the default (1000 pages ~= 4 MB). Disabling
+    // it caused the WAL to grow to 700+ MB during long scans, and every insert
+    // had to walk an ever-larger frame index — the scan got progressively
+    // slower per batch. Default autocheckpoint runs PASSIVE in-line on the
+    // writer connection, which is what we want.
     Ok(())
 }
 

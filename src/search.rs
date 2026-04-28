@@ -36,9 +36,13 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
     let total_indexed = count_documents(conn)?;
     let envelope = freshness_envelope(conn, config)?;
 
+    // Contentless FTS5: column SELECTs from document_fts return NULL, so we
+    // join to documents on rowid (FTS rowid == documents.rowid by construction
+    // in flush_batch). The JOIN also filters out orphan FTS rows whose
+    // documents row was deleted.
     let mut stmt = conn.prepare(
         "SELECT
-            f.content_hash,
+            d.content_hash,
             d.title,
             d.summary,
             d.topics,
@@ -46,7 +50,7 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
             d.embed_excluded,
             rank
          FROM document_fts f
-         JOIN documents d ON d.content_hash = f.content_hash
+         JOIN documents d ON d.rowid = f.rowid
          WHERE document_fts MATCH ?1
          ORDER BY rank
          LIMIT ?2",
@@ -509,37 +513,6 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
         embedder_ok: config.model_path.is_some(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
-}
-
-// ---------------------------------------------------------------------------
-// FTS population (called from scanner after inserting a document)
-// ---------------------------------------------------------------------------
-
-pub fn upsert_fts(
-    conn: &Connection,
-    content_hash: &str,
-    title: Option<&str>,
-    topics: &str,
-    summary: Option<&str>,
-    content: Option<&str>,
-) -> Result<()> {
-    // Delete any existing row first (FTS5 doesn't support UPSERT).
-    conn.execute(
-        "DELETE FROM document_fts WHERE content_hash = ?1",
-        params![content_hash],
-    )?;
-    conn.execute(
-        "INSERT INTO document_fts (content_hash, title, topics, summary, content)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            content_hash,
-            title.unwrap_or(""),
-            topics,
-            summary.unwrap_or(""),
-            content.unwrap_or(""),
-        ],
-    )?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

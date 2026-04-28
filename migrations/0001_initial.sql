@@ -17,12 +17,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(
     embedding FLOAT[1024]
 );
 
+-- Contentless FTS5: stores only the inverted index, never duplicates source
+-- text into the DB. Smriti is an index of files on the filesystem, not a
+-- store of those files.
+--
+-- Linkage: FTS rowid == documents.rowid. Search joins via rowid; we don't
+-- store content_hash here since contentless FTS5 returns NULL for SELECTs
+-- on indexed AND UNINDEXED columns (verified on SQLite 3.51).
+--
+-- Trade-offs:
+--   * snippet()/highlight() can't reconstruct text — re-read the file.
+--   * DELETE/UPDATE not supported without the original tokens. We don't
+--     delete during scan; orphans are filtered at query time via the JOIN.
 CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
-    content_hash UNINDEXED,
     title,
     topics,
     summary,
-    content
+    content,
+    content=''
 );
 
 CREATE TABLE IF NOT EXISTS paths (

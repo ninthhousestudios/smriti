@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use rayon::prelude::*;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 use walkdir::WalkDir;
 
 use crate::config::Config;
@@ -571,9 +571,6 @@ fn scan_batched(
                         "scan {scan_id} batch {total_batches} committed: {total_files_seen} files"
                     );
                 }
-                if total_batches % 20 == 0 {
-                    let _ = db::checkpoint_wal_passive(conn);
-                }
             }
             Err(e) => {
                 let _ = conn.execute(
@@ -811,13 +808,15 @@ fn flush_batch(
     let now_dt_str = now_dt.format("%Y-%m-%d %H:%M:%S").to_string();
     let mut batch_events = Vec::new();
 
-    let mut stmt_doc_exists = tx.prepare_cached(
-        "SELECT COUNT(*) FROM documents WHERE content_hash = ?1",
-    )?;
+    // RETURNING rowid: gives the documents row's rowid on insert, and zero
+    // rows on conflict (INSERT OR IGNORE). We use the rowid to link the FTS
+    // row back to the document — contentless FTS5 returns NULL for column
+    // SELECTs, so the JOIN must go through rowid.
     let mut stmt_insert_doc = tx.prepare_cached(
         "INSERT OR IGNORE INTO documents
             (content_hash, body_hash, title, summary, topics, structure, is_binary, embed_excluded, byte_size, first_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         RETURNING rowid",
     )?;
     let mut stmt_update_body = tx.prepare_cached(
         "UPDATE documents SET body_hash = ?1 WHERE content_hash = ?2 AND body_hash IS NULL",
@@ -836,29 +835,28 @@ fn flush_batch(
         "INSERT INTO events (event_type, content_hash, path, timestamp, file_extension, mime_type, scan_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
-    let mut stmt_fts_delete = tx.prepare_cached(
-        "DELETE FROM document_fts WHERE content_hash = ?1",
-    )?;
+    // Contentless FTS5: INSERT only — DELETE/UPDATE would require the
+    // original tokens we no longer keep. Orphans accumulate harmlessly and
+    // are filtered at query time via JOIN against documents.
+    // rowid is the documents.rowid returned from the doc INSERT.
     let mut stmt_fts_insert = tx.prepare_cached(
-        "INSERT INTO document_fts (content_hash, title, topics, summary, content)
+        "INSERT INTO document_fts (rowid, title, topics, summary, content)
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
 
     for entry in batch {
-        let exists: bool = stmt_doc_exists.query_row(
-            params![entry.content_hash],
-            |row| row.get::<_, i64>(0),
-        )? > 0;
+        if let Some(ref info) = entry.doc_info {
+            let body_hash_opt = if entry.body_hash.is_empty() || entry.body_hash == entry.content_hash {
+                None::<&str>
+            } else {
+                Some(entry.body_hash.as_str())
+            };
 
-        if !exists {
-            if let Some(ref info) = entry.doc_info {
-                let body_hash_opt = if entry.body_hash.is_empty() || entry.body_hash == entry.content_hash {
-                    None::<&str>
-                } else {
-                    Some(entry.body_hash.as_str())
-                };
-
-                stmt_insert_doc.execute(params![
+            // INSERT OR IGNORE ... RETURNING rowid: yields the new rowid on
+            // insert, no rows on conflict. Lets us gate the FTS insert and
+            // skip a separate SELECT COUNT(*) precheck per file.
+            let new_rowid: Option<i64> = stmt_insert_doc.query_row(
+                params![
                     entry.content_hash,
                     body_hash_opt,
                     info.title,
@@ -869,21 +867,23 @@ fn flush_batch(
                     entry.embed_excluded,
                     entry.size_bytes,
                     now_str,
-                ])?;
+                ],
+                |row| row.get(0),
+            ).optional()?;
 
+            if let Some(rowid) = new_rowid {
                 if !info.is_binary {
-                    stmt_fts_delete.execute(params![entry.content_hash])?;
                     stmt_fts_insert.execute(params![
-                        entry.content_hash,
+                        rowid,
                         info.title.as_deref().unwrap_or(""),
                         info.topics_json,
                         info.summary.as_deref().unwrap_or(""),
                         info.fts_content.as_deref().unwrap_or(""),
                     ])?;
                 }
+            } else if !entry.body_hash.is_empty() && entry.body_hash != entry.content_hash {
+                stmt_update_body.execute(params![entry.body_hash, entry.content_hash])?;
             }
-        } else if !entry.body_hash.is_empty() && entry.body_hash != entry.content_hash {
-            stmt_update_body.execute(params![entry.body_hash, entry.content_hash])?;
         }
 
         let path_str = entry.path.to_string_lossy();
@@ -916,14 +916,6 @@ fn flush_batch(
                 mime,
                 scan_id,
             ])?;
-            if matches!(et, EventType::Updated | EventType::MinorChange) {
-                if let Some(prev) = prev_paths.get(&entry.path) {
-                    if prev.content_hash != entry.content_hash {
-                        cleanup_orphaned_fts(&tx, &prev.content_hash)?;
-                    }
-                }
-            }
-
             batch_events.push(Event {
                 event_type: et,
                 content_hash: entry.content_hash.clone(),
@@ -935,14 +927,12 @@ fn flush_batch(
         }
     }
 
-    drop(stmt_doc_exists);
     drop(stmt_insert_doc);
     drop(stmt_update_body);
     drop(stmt_update_seen);
     drop(stmt_disappear);
     drop(stmt_insert_path);
     drop(stmt_insert_event);
-    drop(stmt_fts_delete);
     drop(stmt_fts_insert);
 
     tx.commit()?;
@@ -983,22 +973,6 @@ fn determine_event_type_provisional(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Delete FTS row for a content_hash if no active path references it.
-fn cleanup_orphaned_fts(conn: &Connection, content_hash: &str) -> Result<()> {
-    let active_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM paths WHERE content_hash = ?1 AND disappeared IS NULL",
-        params![content_hash],
-        |row| row.get(0),
-    )?;
-    if active_count == 0 {
-        conn.execute(
-            "DELETE FROM document_fts WHERE content_hash = ?1",
-            params![content_hash],
-        )?;
-    }
-    Ok(())
-}
 
 /// Walk a subtree counting total bytes and file count (for catalog entries).
 fn catalog_subtree(dir: &Path) -> (u64, u64) {
