@@ -98,9 +98,14 @@ smriti serve
 | `smriti scan [--paths <path>...] [-j N]` | Scan allowlisted roots (or specific subtrees) |
 | `smriti scan-status` | Show status of the most recent scan |
 | `smriti find <query> [-k <n>]` | Full-text search (default k=10) |
+| `smriti find --path <glob>` | Search by path pattern (e.g., `"*.iso"`, `"~/Downloads/**"`) |
+| `smriti find --ext <ext>` | Search by file extension (e.g., `.iso`) |
 | `smriti get <content_hash>` | Look up a document by its BLAKE3 hash |
 | `smriti history <path>` | Show lifecycle events for a file |
-| `smriti audit [--min-bytes <n>]` | Backup audit: tier 1 vs tier 2 breakdown |
+| `smriti audit` | Backup audit summary (top 5 extensions, top 5 tier-2) |
+| `smriti audit --full` | Full audit with all extensions and tier-2 entries |
+| `smriti audit --ext <ext>` | List all files with a specific extension |
+| `smriti audit --tier2` | Show only tier-2 catalog entries |
 | `smriti manifest [--format paths\|ndjson]` | Export tier-1 paths for backup tools |
 | `smriti triage` | Analyze index, recommend reclassifications in `$EDITOR` |
 | `smriti backup-audit <root>` | Compare a root against others for redundancy |
@@ -269,7 +274,7 @@ allowlist rules and logs every access.
 }
 ```
 
-## Current state (v0.2.0)
+## Current state (v0.2.3)
 
 **Working:**
 - Full scanner with mtime+size short-circuit, move/copy/hardlink detection
@@ -297,6 +302,38 @@ allowlist rules and logs every access.
 - **Content blob store + revert** — store file versions, enable rollback
 - **Downstream subscriptions** — let other tools (grantha, agents) subscribe to
   scan events
+
+## Installing from source
+
+Requires Rust 1.75+ (for `async fn` in traits). If you don't have Rust:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Clone and install:
+
+```bash
+git clone https://github.com/josharp/manas.git
+cd manas/smriti
+cargo install --path .
+```
+
+This builds in release mode and installs the `smriti` binary to `~/.cargo/bin/`.
+Make sure `~/.cargo/bin` is in your `PATH`.
+
+To rebuild after pulling changes:
+
+```bash
+cd manas/smriti
+cargo install --path .
+```
+
+With dense embeddings (requires downloading the BGE-M3 ONNX model separately):
+
+```bash
+cargo install --path . --features embedding
+```
 
 ## License
 

@@ -1,56 +1,24 @@
-# Handoff — smriti
+# handoff
 
-## Pick up
+## just completed
 
-### 1. Fix stale WAL/SHM and benchmark full scan on ~
+All 4 waves from `docs/plans/triage-find-audit-improvements.md` are implemented, tested (64/64 pass), and installed.
 
-Josh moved `~/.smriti/index.db` but left the `-wal` and `-shm` files behind,
-causing corruption. Before scanning:
+- `find --path` / `--ext` for path/extension search
+- `audit` compact summary by default, `--full` / `--ext` / `--tier2` drill-down
+- triage canonical scoring using smritiignore rules
+- triage directory-pair duplicate collapsing
 
-```bash
-rm ~/.smriti/index.db ~/.smriti/index.db-shm ~/.smriti/index.db-wal
-smriti init
-smriti roots add ~
-```
+README.md updated with new command flags and install-from-source section.
 
-Then benchmark the new parallel hashing pipeline:
+## pick up next
 
-```bash
-# Full power (all 12 hyperthreads)
-time smriti scan
+- **MCP parity**: `FindParams` in `src/mcp.rs` doesn't expose `--path` / `--ext` yet. Add optional `path` and `ext` fields and wire them to `search_path` / `search_extension`.
+- **audit --tier2 perf**: currently runs the full audit query even when only tier2 data is needed. Could add a separate tier2-only query if it becomes a bottleneck.
+- **search_extension perf**: uses `LOWER(p.path) LIKE` which scans the full paths table. If slow on large DBs, consider a generated column or index on the extension.
+- **triage testing**: no unit tests for `canonical_score` or dir-pair collapsing. Worth adding if the scoring logic gets more complex.
 
-# Leaving headroom
-time smriti scan -j 4
-```
+## context
 
-Compare wall time and check `smriti scan-status` / `smriti health` afterward.
-
-### 2. Consider guarding against orphaned WAL/SHM
-
-`smriti init` could detect stale `-wal`/`-shm` files when the `.db` is missing
-or empty, and clean them up automatically. Low effort, prevents user confusion.
-
-### 3. Remaining feature work
-
-From the README planned section, in rough priority order:
-
-- **Parallel walk** — the walk phase is still single-threaded via `walkdir`.
-  Could switch to `ignore::WalkParallel` or `jwalk` for parallel directory
-  traversal. Separate from the hash parallelism already implemented.
-- **`smriti watch`** — inotify/fanotify for incremental updates instead of
-  full rescans. Would make smriti usable as a background service.
-- **systemd user service** — run the daemon as a persistent service.
-- **Hybrid search in CLI/MCP** — `search_hybrid` exists in the codebase but
-  isn't wired to commands yet.
-
-### 4. Explore smriti for the backup problem
-
-Still open from prior session — see if the tier 1/2 split and `smriti manifest`
-can drive Josh's backup workflow. Need a complete scan on ~ first.
-
-## What's solid
-
-- Three-phase scan pipeline: walk → parallel hash (rayon) → batched DB commit
-- `-j/--jobs` flag for thread control
-- 80 tests pass, legacy scanner deleted
-- Binary installed at `~/.cargo/bin/smriti`
+- `SectionRules` (ignore crate's `Gitignore`) does not implement `Clone`. We added `SectionRules::classify()` as the public API instead of requiring ownership.
+- Dir-pair collapsing keys on `(canonical_parent, dup_parent)` using wave-3 scoring order, not lexical. Inconsistent scoring across a pair means files stay individual (correct behavior).
