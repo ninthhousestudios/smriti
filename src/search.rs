@@ -126,7 +126,7 @@ pub fn search_path(
         "SELECT p.path, COALESCE(d.byte_size, 0), p.content_hash, d.title
          FROM paths p
          JOIN documents d ON d.content_hash = p.content_hash
-         WHERE p.disappeared IS NULL AND p.path LIKE ?1
+         WHERE p.disappeared IS NULL AND p.path LIKE ?1 ESCAPE '\'
          ORDER BY d.byte_size DESC
          LIMIT 200",
     )?;

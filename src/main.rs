@@ -28,12 +28,21 @@ enum Commands {
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
-    /// Show backup audit report
+    /// Show backup audit report (summary by default)
     Audit {
         #[arg(long)]
         min_bytes: Option<u64>,
         #[arg(long)]
         sort_by: Option<String>,
+        /// Show all extensions and tier-2 entries
+        #[arg(long)]
+        full: bool,
+        /// Drill into a specific extension (e.g., --ext .iso)
+        #[arg(long)]
+        ext: Option<String>,
+        /// Show only tier-2 catalog entries
+        #[arg(long)]
+        tier2: bool,
     },
     /// Export tier-1 file paths for backup tooling
     Manifest {
@@ -127,7 +136,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init => cmd_init(&config)?,
         Commands::Scan { paths, jobs } => cmd_scan(&config, paths, jobs)?,
-        Commands::Audit { min_bytes, sort_by } => cmd_audit(&config, min_bytes, sort_by)?,
+        Commands::Audit { min_bytes, sort_by, full, ext, tier2 } => cmd_audit(&config, min_bytes, sort_by, full, ext.as_deref(), tier2)?,
         Commands::Manifest { format } => cmd_manifest(&config, &format)?,
         Commands::Find { query, k, path, ext } => cmd_find(&config, query.as_deref(), k, path.as_deref(), ext.as_deref())?,
         Commands::Get { content_hash } => cmd_get(&config, &content_hash)?,
@@ -219,12 +228,38 @@ fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<us
     Ok(())
 }
 
-fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>) -> Result<()> {
+fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, full: bool, ext: Option<&str>, tier2: bool) -> Result<()> {
     let conn = smriti::db::open_readonly(&config.db_path)?;
     let mut audit_config = config.clone();
     audit_config.roots = roots::load_roots(config)?;
 
+    if let Some(ext) = ext {
+        let result = search::search_extension(&conn, ext, config)?;
+        return print_path_results(&result, &format!("extension .{}", ext.trim_start_matches('.')));
+    }
+
     let result = search::audit(&conn, min_bytes, sort_by.as_deref(), &audit_config)?;
+
+    if tier2 {
+        println!("Tier 2 (cataloged — regenerable, don't back up):");
+        println!("  Dirs:  {}", result.tier2_total_dirs);
+        println!("  Size:  {}", format_bytes(result.tier2_total_bytes));
+        if !result.tier2_largest.is_empty() {
+            for entry in &result.tier2_largest {
+                println!(
+                    "  {:<10}  {} ({} files){}",
+                    format_bytes(entry.total_bytes),
+                    entry.path,
+                    entry.file_count,
+                    if entry.regenerable { " [regenerable]" } else { "" },
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let ext_limit = if full { usize::MAX } else { 5 };
+    let tier2_limit = if full { usize::MAX } else { 5 };
 
     println!("=== Backup Audit ===\n");
     println!("Roots: {}", if result.roots.is_empty() { "(none)".to_string() } else { result.roots.join(", ") });
@@ -237,11 +272,11 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>) -
         println!("  By extension:");
         let mut exts: Vec<_> = result.tier1_by_extension.iter().collect();
         exts.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes));
-        for (ext, stats) in exts.iter().take(15) {
+        for (ext, stats) in exts.iter().take(ext_limit) {
             println!("    {:<12} {:>6} files  {}", ext, stats.files, format_bytes(stats.bytes));
         }
-        if exts.len() > 15 {
-            println!("    ... and {} more extensions", exts.len() - 15);
+        if exts.len() > ext_limit {
+            println!("    ... and {} more extensions (use --full to see all)", exts.len() - ext_limit);
         }
     }
     println!();
@@ -251,13 +286,16 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>) -
     println!("  Size:  {}", format_bytes(result.tier2_total_bytes));
     if !result.tier2_largest.is_empty() {
         println!("  Largest:");
-        for entry in &result.tier2_largest {
+        for entry in result.tier2_largest.iter().take(tier2_limit) {
             println!(
                 "    {}  {} ({} files)",
                 format_bytes(entry.total_bytes),
                 entry.path,
                 entry.file_count,
             );
+        }
+        if result.tier2_largest.len() > tier2_limit {
+            println!("    ... and {} more (use --full or --tier2 to see all)", result.tier2_largest.len() - tier2_limit);
         }
     }
     println!();
