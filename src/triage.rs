@@ -406,14 +406,12 @@ pub fn format_triage_file(report: &TriageReport) -> String {
 
         for group in &report.duplicates {
             if group.paths.len() == 2 {
-                if let (Some(a), Some(b)) = (group.paths[0].parent(), group.paths[1].parent()) {
-                    let key = if a <= b {
-                        (a.to_path_buf(), b.to_path_buf())
-                    } else {
-                        (b.to_path_buf(), a.to_path_buf())
-                    };
-                    dir_pairs.entry(key).or_default().push(group);
-                    continue;
+                if let (Some(canonical), Some(dup)) = (group.paths[0].parent(), group.paths[1].parent()) {
+                    if canonical != dup {
+                        let key = (canonical.to_path_buf(), dup.to_path_buf());
+                        dir_pairs.entry(key).or_default().push(group);
+                        continue;
+                    }
                 }
             }
             individual.push(group);
