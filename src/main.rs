@@ -82,6 +82,8 @@ enum Commands {
 enum RootsAction {
     Add { path: PathBuf },
     Remove { path: PathBuf },
+    Enable { path: PathBuf },
+    Disable { path: PathBuf },
     List,
 }
 
@@ -325,35 +327,46 @@ fn cmd_history(config: &Config, path: &str, since: Option<String>, until: Option
 fn cmd_roots(action: RootsAction) -> Result<()> {
     match action {
         RootsAction::Add { path } => {
-            let abs = if path.is_relative() {
-                std::env::current_dir()?.join(&path)
-            } else {
-                path.clone()
-            };
+            let abs = abs_path(&path)?;
             roots::add_root(&abs)?;
             println!("Added root: {}", abs.display());
         }
         RootsAction::Remove { path } => {
-            let abs = if path.is_relative() {
-                std::env::current_dir()?.join(&path)
-            } else {
-                path.clone()
-            };
+            let abs = abs_path(&path)?;
             roots::remove_root(&abs)?;
             println!("Removed root: {}", abs.display());
         }
+        RootsAction::Enable { path } => {
+            let abs = abs_path(&path)?;
+            roots::enable_root(&abs)?;
+            println!("Enabled root: {}", abs.display());
+        }
+        RootsAction::Disable { path } => {
+            let abs = abs_path(&path)?;
+            roots::disable_root(&abs)?;
+            println!("Disabled root: {}", abs.display());
+        }
         RootsAction::List => {
-            let list = roots::list_roots()?;
+            let list = roots::list_all_roots()?;
             if list.is_empty() {
                 println!("No roots configured.");
             } else {
-                for r in &list {
-                    println!("{}", r.display());
+                for e in &list {
+                    let status = if e.enabled { "enabled" } else { "disabled" };
+                    println!("[{status}] {}", e.path.display());
                 }
             }
         }
     }
     Ok(())
+}
+
+fn abs_path(path: &PathBuf) -> Result<PathBuf> {
+    Ok(if path.is_relative() {
+        std::env::current_dir()?.join(path)
+    } else {
+        path.clone()
+    })
 }
 
 fn cmd_prune(config: &Config, older_than: Option<String>) -> Result<()> {
