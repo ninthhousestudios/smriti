@@ -20,7 +20,6 @@ use crate::error::Result;
 use crate::hasher;
 use crate::ignore::{hardened_defaults, IgnoreStack, PathClassification, SectionRules};
 use crate::metadata;
-use crate::search;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -100,6 +99,15 @@ struct PrevPathEntry {
 }
 
 /// What we computed for a path in the current scan.
+struct DocInfo {
+    title: Option<String>,
+    summary: Option<String>,
+    topics_json: String,
+    structure_json: String,
+    is_binary: bool,
+    fts_content: Option<String>,
+}
+
 #[derive(Debug)]
 struct CurrentEntry {
     path: PathBuf,
@@ -108,9 +116,15 @@ struct CurrentEntry {
     body_hash: String,
     mtime: i64,
     size_bytes: i64,
-    is_large: bool,
     short_circuited: bool,
     embed_excluded: bool,
+    doc_info: Option<DocInfo>,
+}
+
+impl std::fmt::Debug for DocInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocInfo").field("title", &self.title).finish_non_exhaustive()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -407,35 +421,90 @@ fn scan_batched(
     );
 
     // ------------------------------------------------------------------
-    // 4. Hash phase: parallel via rayon (only entries that need hashing)
+    // 4. Hash + metadata phase: parallel via rayon
+    //    Reads each file once for hashing AND metadata extraction.
     // ------------------------------------------------------------------
-    let hash_results: Vec<Option<(usize, String, String)>> = walk_entries
+    let fts_max = config.fts_content_max_bytes as usize;
+    let hash_results: Vec<Option<(usize, String, String, Option<DocInfo>)>> = walk_entries
         .par_iter()
         .enumerate()
         .filter_map(|(idx, entry)| {
             if !entry.needs_hash {
                 return None;
             }
-            Some(match hasher::hash_file_and_body(&entry.path, entry.is_large) {
-                Ok((content_hash, body_hash)) => Some((idx, content_hash, body_hash)),
-                Err(e) => {
-                    tracing::warn!("cannot hash {}: {}", entry.path.display(), e);
-                    None
-                }
-            })
+            if entry.is_large {
+                // Stream-hash large files without reading fully into memory.
+                Some(match hasher::hash_file(&entry.path) {
+                    Ok(content_hash) => {
+                        let doc_info = DocInfo {
+                            title: None,
+                            summary: None,
+                            topics_json: "[]".to_string(),
+                            structure_json: "[]".to_string(),
+                            is_binary: true,
+                            fts_content: None,
+                        };
+                        Some((idx, content_hash.clone(), content_hash, Some(doc_info)))
+                    }
+                    Err(e) => {
+                        tracing::warn!("cannot hash {}: {}", entry.path.display(), e);
+                        None
+                    }
+                })
+            } else {
+                // Read once: hash + metadata + FTS in one pass.
+                Some(match std::fs::read(&entry.path) {
+                    Ok(content) => {
+                        let content_hash = hasher::hash_content(&content);
+                        let body_hash = hasher::hash_body(&content);
+                        let meta = metadata::extract_metadata(&entry.path, &content);
+                        let topics_json = serde_json::to_string(&meta.topics)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        let structure_json = serde_json::to_string(
+                            &meta.structure.iter().map(|s| {
+                                serde_json::json!({
+                                    "heading": s.heading,
+                                    "level": s.level,
+                                    "line": s.line,
+                                })
+                            }).collect::<Vec<_>>()
+                        ).unwrap_or_else(|_| "[]".to_string());
+                        let fts_content = if !meta.is_binary {
+                            std::str::from_utf8(&content)
+                                .ok()
+                                .map(|s| truncate_to_char_boundary(s, fts_max).to_string())
+                        } else {
+                            None
+                        };
+                        let doc_info = DocInfo {
+                            title: meta.title,
+                            summary: meta.summary,
+                            topics_json,
+                            structure_json,
+                            is_binary: meta.is_binary,
+                            fts_content,
+                        };
+                        Some((idx, content_hash, body_hash, Some(doc_info)))
+                    }
+                    Err(e) => {
+                        tracing::warn!("cannot read {}: {}", entry.path.display(), e);
+                        None
+                    }
+                })
+            }
         })
         .collect();
 
     // Merge hash results into CurrentEntry list.
-    let mut hash_map: HashMap<usize, (String, String)> = HashMap::new();
+    let mut hash_map: HashMap<usize, (String, String, Option<DocInfo>)> = HashMap::new();
     for result in hash_results.into_iter().flatten() {
-        let (idx, content_hash, body_hash) = result;
-        hash_map.insert(idx, (content_hash, body_hash));
+        let (idx, content_hash, body_hash, doc_info) = result;
+        hash_map.insert(idx, (content_hash, body_hash, doc_info));
     }
 
     let hash_elapsed = start.elapsed() - walk_elapsed;
     tracing::info!(
-        "scan {scan_id} hash complete: {} files hashed in {:.1}s",
+        "scan {scan_id} hash+metadata complete: {} files processed in {:.1}s",
         hash_map.len(),
         hash_elapsed.as_secs_f64(),
     );
@@ -446,13 +515,13 @@ fn scan_batched(
     let mut current_inode_to_paths: HashMap<u64, Vec<PathBuf>> = HashMap::new();
 
     for (idx, we) in walk_entries.into_iter().enumerate() {
-        let (content_hash, body_hash, short_circuited) = if we.needs_hash {
+        let (content_hash, body_hash, short_circuited, doc_info) = if we.needs_hash {
             match hash_map.remove(&idx) {
-                Some((ch, bh)) => (ch, bh, false),
+                Some((ch, bh, di)) => (ch, bh, false, di),
                 None => continue, // hash failed, skip
             }
         } else {
-            (we.prev_hash.unwrap(), String::new(), true)
+            (we.prev_hash.unwrap(), String::new(), true, None)
         };
 
         current_hash_to_paths
@@ -471,9 +540,9 @@ fn scan_batched(
             body_hash,
             mtime: we.mtime,
             size_bytes: we.size_bytes,
-            is_large: we.is_large,
             short_circuited,
             embed_excluded: we.embed_excluded,
+            doc_info,
         });
     }
 
@@ -728,8 +797,6 @@ fn scan_batched(
     })
 }
 
-/// Flush a batch of entries to the database in a single transaction.
-/// Returns the events emitted for this batch.
 fn flush_batch(
     conn: &mut Connection,
     batch: &[CurrentEntry],
@@ -737,141 +804,118 @@ fn flush_batch(
     old_body_hashes: &HashMap<String, String>,
     scan_id: i64,
     now_str: &str,
-    config: &Config,
+    _config: &Config,
 ) -> Result<Vec<Event>> {
     let tx = conn.transaction()?;
     let now_dt = Utc::now();
+    let now_dt_str = now_dt.format("%Y-%m-%d %H:%M:%S").to_string();
     let mut batch_events = Vec::new();
 
+    let mut stmt_doc_exists = tx.prepare_cached(
+        "SELECT COUNT(*) FROM documents WHERE content_hash = ?1",
+    )?;
+    let mut stmt_insert_doc = tx.prepare_cached(
+        "INSERT OR IGNORE INTO documents
+            (content_hash, body_hash, title, summary, topics, structure, is_binary, embed_excluded, byte_size, first_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    )?;
+    let mut stmt_update_body = tx.prepare_cached(
+        "UPDATE documents SET body_hash = ?1 WHERE content_hash = ?2 AND body_hash IS NULL",
+    )?;
+    let mut stmt_update_seen = tx.prepare_cached(
+        "UPDATE paths SET last_seen_scan = ?1 WHERE path = ?2 AND disappeared IS NULL",
+    )?;
+    let mut stmt_disappear = tx.prepare_cached(
+        "UPDATE paths SET disappeared = ?1 WHERE path = ?2 AND disappeared IS NULL",
+    )?;
+    let mut stmt_insert_path = tx.prepare_cached(
+        "INSERT INTO paths (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
+    let mut stmt_insert_event = tx.prepare_cached(
+        "INSERT INTO events (event_type, content_hash, path, timestamp, file_extension, mime_type, scan_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    let mut stmt_fts_delete = tx.prepare_cached(
+        "DELETE FROM document_fts WHERE content_hash = ?1",
+    )?;
+    let mut stmt_fts_insert = tx.prepare_cached(
+        "INSERT INTO document_fts (content_hash, title, topics, summary, content)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+
     for entry in batch {
-        // Upsert document.
-        let exists: bool = tx.query_row(
-            "SELECT COUNT(*) FROM documents WHERE content_hash = ?1",
+        let exists: bool = stmt_doc_exists.query_row(
             params![entry.content_hash],
             |row| row.get::<_, i64>(0),
         )? > 0;
 
         if !exists {
-            let (title, summary, topics_json, structure_json, is_binary_doc, fts_content) = if entry.is_large {
-                (None::<String>, None::<String>, "[]".to_string(), "[]".to_string(), true, None::<String>)
-            } else {
-                match std::fs::read(&entry.path) {
-                    Ok(content) => {
-                        let meta = metadata::extract_metadata(&entry.path, &content);
-                        let topics_json = serde_json::to_string(&meta.topics).unwrap_or_else(|_| "[]".to_string());
-                        let structure_json = serde_json::to_string(
-                            &meta.structure.iter().map(|s| {
-                                serde_json::json!({
-                                    "heading": s.heading,
-                                    "level": s.level,
-                                    "line": s.line,
-                                })
-                            }).collect::<Vec<_>>()
-                        ).unwrap_or_else(|_| "[]".to_string());
-                        let fts_content = if !meta.is_binary {
-                            std::str::from_utf8(&content)
-                                .ok()
-                                .map(|s| truncate_to_char_boundary(s, config.fts_content_max_bytes as usize).to_string())
-                        } else {
-                            None
-                        };
-                        (meta.title, meta.summary, topics_json, structure_json, meta.is_binary, fts_content)
-                    }
-                    Err(_) => (None, None, "[]".to_string(), "[]".to_string(), false, None),
-                }
-            };
+            if let Some(ref info) = entry.doc_info {
+                let body_hash_opt = if entry.body_hash.is_empty() || entry.body_hash == entry.content_hash {
+                    None::<&str>
+                } else {
+                    Some(entry.body_hash.as_str())
+                };
 
-            let body_hash_opt = if entry.body_hash.is_empty() || entry.body_hash == entry.content_hash {
-                None::<String>
-            } else {
-                Some(entry.body_hash.clone())
-            };
-
-            tx.execute(
-                "INSERT OR IGNORE INTO documents
-                    (content_hash, body_hash, title, summary, topics, structure, is_binary, embed_excluded, byte_size, first_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
+                stmt_insert_doc.execute(params![
                     entry.content_hash,
                     body_hash_opt,
-                    title,
-                    summary,
-                    topics_json,
-                    structure_json,
-                    is_binary_doc,
+                    info.title,
+                    info.summary,
+                    info.topics_json,
+                    info.structure_json,
+                    info.is_binary,
                     entry.embed_excluded,
                     entry.size_bytes,
                     now_str,
-                ],
-            )?;
+                ])?;
 
-            if !is_binary_doc {
-                search::upsert_fts(
-                    &tx,
-                    &entry.content_hash,
-                    title.as_deref(),
-                    &topics_json,
-                    summary.as_deref(),
-                    fts_content.as_deref(),
-                )?;
+                if !info.is_binary {
+                    stmt_fts_delete.execute(params![entry.content_hash])?;
+                    stmt_fts_insert.execute(params![
+                        entry.content_hash,
+                        info.title.as_deref().unwrap_or(""),
+                        info.topics_json,
+                        info.summary.as_deref().unwrap_or(""),
+                        info.fts_content.as_deref().unwrap_or(""),
+                    ])?;
+                }
             }
         } else if !entry.body_hash.is_empty() && entry.body_hash != entry.content_hash {
-            tx.execute(
-                "UPDATE documents SET body_hash = ?1 WHERE content_hash = ?2 AND body_hash IS NULL",
-                params![entry.body_hash, entry.content_hash],
-            )?;
+            stmt_update_body.execute(params![entry.body_hash, entry.content_hash])?;
         }
 
-        // Persist path.
+        let path_str = entry.path.to_string_lossy();
         if entry.short_circuited {
-            tx.execute(
-                "UPDATE paths SET last_seen_scan = ?1
-                 WHERE path = ?2 AND disappeared IS NULL",
-                params![scan_id, entry.path.to_string_lossy().as_ref()],
-            )?;
+            stmt_update_seen.execute(params![scan_id, path_str.as_ref()])?;
         } else {
-            tx.execute(
-                "UPDATE paths SET disappeared = ?1
-                 WHERE path = ?2 AND disappeared IS NULL",
-                params![now_str, entry.path.to_string_lossy().as_ref()],
-            )?;
-
-            let is_hardlink = false; // Provisional; finalize may detect hardlinks.
-            tx.execute(
-                "INSERT INTO paths (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    entry.content_hash,
-                    entry.path.to_string_lossy().as_ref(),
-                    entry.root.to_string_lossy().as_ref(),
-                    is_hardlink,
-                    entry.mtime,
-                    entry.size_bytes,
-                    now_str,
-                    scan_id,
-                ],
-            )?;
+            stmt_disappear.execute(params![now_str, path_str.as_ref()])?;
+            stmt_insert_path.execute(params![
+                entry.content_hash,
+                path_str.as_ref(),
+                entry.root.to_string_lossy().as_ref(),
+                false,
+                entry.mtime,
+                entry.size_bytes,
+                now_str,
+                scan_id,
+            ])?;
         }
 
-        // Determine provisional event (Created for new paths; Updated/MinorChange
-        // for existing paths with changed hashes; move/copy deferred to finalize).
         let event_type = determine_event_type_provisional(entry, prev_paths, old_body_hashes);
         if let Some(et) = event_type {
             let ext = metadata::file_extension(&entry.path);
             let mime = metadata::detect_mime_type(&entry.path);
-            tx.execute(
-                "INSERT INTO events (event_type, content_hash, path, timestamp, file_extension, mime_type, scan_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    et.as_str(),
-                    entry.content_hash,
-                    entry.path.to_string_lossy().as_ref(),
-                    now_dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    ext,
-                    mime,
-                    scan_id,
-                ],
-            )?;
+            stmt_insert_event.execute(params![
+                et.as_str(),
+                entry.content_hash,
+                path_str.as_ref(),
+                now_dt_str,
+                ext,
+                mime,
+                scan_id,
+            ])?;
             if matches!(et, EventType::Updated | EventType::MinorChange) {
                 if let Some(prev) = prev_paths.get(&entry.path) {
                     if prev.content_hash != entry.content_hash {
@@ -883,13 +927,23 @@ fn flush_batch(
             batch_events.push(Event {
                 event_type: et,
                 content_hash: entry.content_hash.clone(),
-                path: entry.path.to_string_lossy().to_string(),
+                path: path_str.to_string(),
                 timestamp: now_dt,
                 file_extension: ext,
                 mime_type: mime,
             });
         }
     }
+
+    drop(stmt_doc_exists);
+    drop(stmt_insert_doc);
+    drop(stmt_update_body);
+    drop(stmt_update_seen);
+    drop(stmt_disappear);
+    drop(stmt_insert_path);
+    drop(stmt_insert_event);
+    drop(stmt_fts_delete);
+    drop(stmt_fts_insert);
 
     tx.commit()?;
     Ok(batch_events)
