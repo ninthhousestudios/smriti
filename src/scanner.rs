@@ -15,6 +15,7 @@ use rusqlite::{Connection, params};
 use walkdir::WalkDir;
 
 use crate::config::Config;
+use crate::db;
 use crate::error::Result;
 use crate::hasher;
 use crate::ignore::{hardened_defaults, IgnoreStack, PathClassification, SectionRules};
@@ -186,6 +187,8 @@ fn scan_batched(
     let now = Utc::now();
     let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
     let batch_size = config.scan_batch_size;
+
+    db::enable_scan_pragmas(conn)?;
 
     // ------------------------------------------------------------------
     // 1. Register this scan run
@@ -390,6 +393,7 @@ fn scan_batched(
                 scan_id,
             ],
         );
+        let _ = db::restore_default_pragmas(conn);
         return Err(e);
     }
 
@@ -498,6 +502,9 @@ fn scan_batched(
                         "scan {scan_id} batch {total_batches} committed: {total_files_seen} files"
                     );
                 }
+                if total_batches % 20 == 0 {
+                    let _ = db::checkpoint_wal_passive(conn);
+                }
             }
             Err(e) => {
                 let _ = conn.execute(
@@ -508,6 +515,7 @@ fn scan_batched(
                         scan_id,
                     ],
                 );
+                let _ = db::restore_default_pragmas(conn);
                 return Err(e);
             }
         }
@@ -704,6 +712,7 @@ fn scan_batched(
         all_events.len(),
     );
 
+    db::restore_default_pragmas(conn)?;
     crate::db::prune_audit_log(conn, config.audit_retention_days)?;
 
     let tier2 = Tier2Summary {

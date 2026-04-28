@@ -47,6 +47,38 @@ pub fn checkpoint_wal(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Passive WAL checkpoint — doesn't block readers or writers.
+pub fn checkpoint_wal_passive(conn: &Connection) -> Result<()> {
+    conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
+pub fn enable_scan_pragmas(conn: &Connection) -> Result<()> {
+    set_pragma(conn, "synchronous", "NORMAL")?;
+    set_pragma(conn, "cache_size", "-64000")?;
+    set_pragma(conn, "mmap_size", "268435456")?;
+    set_pragma(conn, "temp_store", "2")?;
+    set_pragma(conn, "wal_autocheckpoint", "0")?;
+    Ok(())
+}
+
+pub fn restore_default_pragmas(conn: &Connection) -> Result<()> {
+    set_pragma(conn, "synchronous", "FULL")?;
+    set_pragma(conn, "cache_size", "-2000")?;
+    set_pragma(conn, "mmap_size", "0")?;
+    set_pragma(conn, "temp_store", "0")?;
+    set_pragma(conn, "wal_autocheckpoint", "1000")?;
+    Ok(())
+}
+
+fn set_pragma(conn: &Connection, name: &str, value: &str) -> Result<()> {
+    let sql = format!("PRAGMA {name} = {value}");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let sql = include_str!("../migrations/0001_initial.sql");
     conn.execute_batch(sql).map_err(|e| SmritiError::Migration {

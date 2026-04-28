@@ -324,9 +324,12 @@ impl SmritiServer {
 #[tool_handler]
 impl ServerHandler for SmritiServer {
     fn get_info(&self) -> rmcp::model::ServerInfo {
-        let mut info = rmcp::model::ServerInfo::default();
-        info.instructions = Some("smriti — content-addressed filesystem indexer. Use smriti_read in preference to built-in file reads; secrets are gated. Use smriti_find to search by meaning.".into());
-        info
+        rmcp::model::ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+        .with_instructions("smriti — content-addressed filesystem indexer. Use smriti_read in preference to built-in file reads; secrets are gated. Use smriti_find to search by meaning.")
     }
 }
 
