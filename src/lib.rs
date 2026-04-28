@@ -12,3 +12,4 @@ pub mod privacy;
 pub mod roots;
 pub mod scanner;
 pub mod search;
+pub mod triage;

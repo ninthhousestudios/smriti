@@ -76,6 +76,8 @@ enum Commands {
     ScanStatus,
     /// Run the background daemon (Wave 5)
     Daemon,
+    /// Analyze index and recommend tier reclassifications
+    Triage,
 }
 
 #[derive(Subcommand)]
@@ -118,6 +120,7 @@ fn main() -> Result<()> {
                 .build()?
                 .block_on(smriti::daemon::run_stdio(config))?;
         }
+        Commands::Triage => cmd_triage(&config)?,
     }
 
     Ok(())
@@ -428,6 +431,46 @@ fn cmd_scan_status(config: &Config) -> Result<()> {
             println!("No scan runs recorded yet.");
         }
     }
+    Ok(())
+}
+
+fn cmd_triage(config: &Config) -> Result<()> {
+    let conn = smriti::db::open(&config.db_path)?;
+    let report = smriti::triage::analyze(&conn)?;
+
+    if report.recommendations.is_empty() && report.duplicates.is_empty() {
+        println!("No recommendations. Index looks clean.");
+        return Ok(());
+    }
+
+    let content = smriti::triage::format_triage_file(&report);
+
+    let tmp = tempfile::NamedTempFile::new()?;
+    std::fs::write(tmp.path(), &content)?;
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let status = std::process::Command::new(&editor)
+        .arg(tmp.path())
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("Editor exited with non-zero status");
+    }
+
+    let edited = std::fs::read_to_string(tmp.path())?;
+    let decisions = smriti::triage::parse_triage_file(&edited)?;
+
+    if decisions.is_empty() {
+        println!("No changes to apply.");
+        return Ok(());
+    }
+
+    let result = smriti::triage::apply_triage(&decisions)?;
+    println!("Applied {} changes.", result.applied);
+    for msg in &result.messages {
+        println!("  {msg}");
+    }
+
     Ok(())
 }
 
