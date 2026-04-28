@@ -2,42 +2,59 @@
 
 ## Pick up
 
-### 1. Install and test batched scanner on real data
+### 1. Check the batched scan results
+
+A batched scan (`SMRITI_SCAN_BATCHED=1`) was kicked off on `/home/josh` this
+session. Check whether it completed:
 
 ```bash
-cargo install --path . --force
-SMRITI_SCAN_BATCHED=1 RUST_LOG=smriti=info smriti scan
-# Watch for batch progress logs every ~10 batches
-# In another terminal: smriti scan-status
+smriti scan-status
 smriti health
 ```
 
-Compare doc/event counts against a legacy scan (without SMRITI_SCAN_BATCHED).
-If results match, flip the default to batched and delete legacy code.
+If it completed, look at doc/event counts and spot-check a few files with
+`smriti find` and `smriti history`. If it failed, check the error — the DB
+locking fix should have resolved the previous "database is locked" crash.
 
-### 2. Daemon workflow / systemd
+### 2. Explore smriti for the backup problem
 
-The daemon (`smriti daemon`) runs MCP over stdio — designed for editor/agent
-integration, not filesystem watching. It does NOT auto-scan on file changes.
+Josh wants to see if/how smriti can help with his backup situation. Relevant
+commands:
 
-Questions to resolve:
-- Should there be a `smriti watch` command that uses inotify/fanotify for
-  incremental updates? (Out of scope per the plan, but the natural next step.)
-- Should `smriti scan` run on a cron/systemd timer (e.g., every 5 min)?
-- Should the daemon be a systemd user service so MCP clients can connect?
+- `smriti audit` — shows tier 1 (back this up) vs tier 2 (regenerable) breakdown
+  with byte totals
+- `smriti manifest` — exports tier-1 paths for rsync/restic/borg
+- `smriti manifest --format ndjson` — richer output with hashes
 
-The daemon is untested on real data. Test it via the MCP stdio protocol.
+Questions to explore:
+- Does the tier 1/2 split match what Josh actually cares about backing up?
+- Are there directories that should be cataloged (tier 2) but aren't in the
+  hardened defaults? Might need a `~/.smritiignore` with `[catalog]` entries.
+- What does the byte breakdown look like? How much is tier 1 vs tier 2?
+- Can `smriti manifest | rsync ...` be a practical backup workflow?
 
-### 3. After batched scan is validated
+### 3. Decide next steps
 
-- Flip default: remove the `SMRITI_SCAN_BATCHED` gate, make batched the only path
-- Delete `scan_legacy()` and the dispatch logic in `scan()`
-- Add `scan-status` as an MCP tool (currently CLI only)
+Based on scan results and backup exploration, decide:
+- Flip batched scanner to default? (delete legacy code)
+- Add a user-level `~/.smritiignore` for Josh's specific setup?
+- Wire up `smriti watch` or a cron/systemd timer for regular scans?
+- Any other features needed for the backup use case?
+
+## What changed this session
+
+- **DB locking fix**: `busy_timeout(5s)` added to all connections;
+  `wal_checkpoint(TRUNCATE)` moved from `db::open()` to `db::checkpoint_wal()`
+  called only before scans. Read-only commands no longer contend with active
+  scans.
+- **README.md**: comprehensive project README covering features, commands,
+  config, MCP tools, current state, and planned features.
+- **docs/architecture.md**: module breakdown, data flow diagrams, full schema,
+  concurrency model.
+- **docs/index.md**: updated to include architecture doc.
 
 ## What's solid
 
-- Batched scanner implemented and tested (80 tests pass, 7 new batched tests)
-- Three bug fixes shipped: roots remove validation, embed_excluded threading,
-  stale FTS cleanup
-- Migration 0002 is idempotent (probes column existence before ALTER TABLE)
-- Legacy scan path preserved as fallback behind feature gate
+- DB locking fix compiled, installed, scan running with it
+- 80 tests pass (as of last full run)
+- README and architecture docs complete

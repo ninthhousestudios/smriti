@@ -25,17 +25,19 @@ pub fn open(path: &Path) -> Result<Connection> {
 
     // PRAGMA journal_mode returns a row, so we must use pragma_update_and_check.
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
-
-    // Force-checkpoint any existing WAL frames into the main DB and reset
-    // the WAL/SHM files. Without this, a previous crash can leave stale
-    // committed frames in the WAL; when the next large scan transaction
-    // appends on top, the combined WAL triggers SIGBUS in walFindFrame
-    // during SHM hash-table lookups.
-    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
     run_migrations(&conn)?;
 
     Ok(conn)
+}
+
+/// Checkpoint and truncate the WAL. Call before write-heavy operations (scan)
+/// to prevent stale WAL frames from causing SIGBUS. Not needed for read-only
+/// commands — the exclusive lock it requires would contend with concurrent scans.
+pub fn checkpoint_wal(conn: &Connection) -> Result<()> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
 }
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
