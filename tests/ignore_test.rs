@@ -276,3 +276,44 @@ fn test_anchored_pattern() {
         "anchored pattern should NOT match in subdirectory"
     );
 }
+
+/// `~/foo/` in a smritiignore must anchor to base_dir (intended to be HOME).
+/// Gitignore semantics don't expand `~`, so the parser strips it so the pattern
+/// becomes `/foo/` (anchored). Regression test for the manifest bug where
+/// `~/Downloads/` in ~/.smritiignore matched nothing.
+#[test]
+fn test_tilde_prefix_anchors_to_base() {
+    let tmp = TempDir::new().unwrap();
+    let content = "[catalog]\n~/Downloads/\n~/dev/\n";
+
+    // base = tmp acts as HOME. The scanner classifies directories and
+    // skips matching subtrees, so we only need ~/Downloads/ to match the
+    // directory itself; child files aren't visited.
+    assert_eq!(
+        classify_with(tmp.path(), content, "Downloads", true),
+        PathClassification::Cataloged,
+        "~/Downloads/ must match the Downloads dir at base"
+    );
+    assert_eq!(
+        classify_with(tmp.path(), content, "dev", true),
+        PathClassification::Cataloged,
+        "~/dev/ must match the dev dir at base"
+    );
+
+    // Anchoring: ~/Downloads/ should NOT match a nested Downloads dir.
+    assert_eq!(
+        classify_with(tmp.path(), content, "sub/Downloads", true),
+        PathClassification::Indexed,
+        "~/Downloads/ is anchored and must not match a nested Downloads dir"
+    );
+}
+
+/// `!~/foo/` (negation with tilde) parses correctly.
+#[test]
+fn test_tilde_negation_parses() {
+    let tmp = TempDir::new().unwrap();
+    // Catalog everything, then un-catalog ~/keep/.
+    let content = "[catalog]\n*\n!~/keep/\n";
+    let rules = parse_smritiignore(content, tmp.path());
+    assert!(rules.is_ok(), "!~/keep/ must parse");
+}

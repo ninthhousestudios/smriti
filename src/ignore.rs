@@ -95,8 +95,20 @@ pub fn parse_smritiignore(content: &str, base_dir: &Path) -> Result<SectionRules
             Section::NoEmbed => &mut no_embed_builder,
         };
 
+        // Gitignore semantics don't expand `~`. Treat a leading `~/` (or
+        // `!~/` for negation) as "anchored to base_dir" — drop the tilde so
+        // the pattern becomes `/<rest>`. For ~/.smritiignore this means
+        // patterns like `~/Downloads/` correctly anchor to HOME.
+        let pattern = if let Some(rest) = trimmed.strip_prefix("~/") {
+            format!("/{rest}")
+        } else if let Some(rest) = trimmed.strip_prefix("!~/") {
+            format!("!/{rest}")
+        } else {
+            trimmed.to_string()
+        };
+
         builder
-            .add_line(None, trimmed)
+            .add_line(None, &pattern)
             .map_err(|e| SmritiError::Other(format!("ignore pattern error: {e}")))?;
     }
 
