@@ -115,7 +115,13 @@ impl SmritiServer {
 
     #[tool(description = "Trigger a scan cycle over allowlisted roots. Returns summary of changes.")]
     async fn smriti_scan(&self, Parameters(p): Parameters<ScanParams>) -> String {
-        let mut conn = self.db.lock().unwrap();
+        // Open a fresh writer connection just for this scan; the persistent
+        // self.db is read-only so it can't conflict with a concurrent
+        // `smriti scan` CLI invocation on the same wal-index SHM.
+        let mut conn = match crate::db::open(&self.config.db_path) {
+            Ok(c) => c,
+            Err(e) => return format!("Error opening writer connection: {e}"),
+        };
         let mut scan_config = (*self.config).clone();
 
         if let Some(paths) = p.paths {

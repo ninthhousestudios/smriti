@@ -8,7 +8,14 @@ use crate::config::Config;
 use crate::mcp::SmritiServer;
 
 pub async fn run_stdio(config: Config) -> anyhow::Result<()> {
-    let conn = crate::db::open(&config.db_path)?;
+    // Run migrations once with a write connection, then close it. The
+    // persistent server connection is read-only — if smriti-serve held an
+    // rw connection while `smriti scan` (CLI) ran, two writer-capable
+    // processes would share the wal-index SHM mmap and the scan would
+    // SIGBUS in walCheckpoint. Writes go through smriti_scan which opens
+    // a fresh writer connection on demand.
+    drop(crate::db::open(&config.db_path)?);
+    let conn = crate::db::open_readonly(&config.db_path)?;
     let db = Arc::new(Mutex::new(conn));
     let cfg = Arc::new(config);
     let server = SmritiServer::new(db, cfg);
@@ -28,7 +35,8 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
     };
     use tokio_util::sync::CancellationToken;
 
-    let conn = crate::db::open(&config.db_path)?;
+    drop(crate::db::open(&config.db_path)?);
+    let conn = crate::db::open_readonly(&config.db_path)?;
     let db = Arc::new(Mutex::new(conn));
     let cfg = Arc::new(config);
 

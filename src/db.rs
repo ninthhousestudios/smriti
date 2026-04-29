@@ -14,7 +14,6 @@ pub fn open(path: &Path) -> Result<Connection> {
 pub fn open_readonly(path: &Path) -> Result<Connection> {
     let conn = open_connection(path)?;
     conn.pragma_update(None, "query_only", "ON")?;
-    set_pragma(&conn, "wal_autocheckpoint", "0")?;
     Ok(conn)
 }
 
@@ -59,9 +58,12 @@ pub fn enable_scan_pragmas(conn: &Connection) -> Result<()> {
     // 256 MB page cache: hot working set (FTS5 index, paths index, documents)
     // exceeds the previous 64 MB once the DB grows past a few hundred MB.
     set_pragma(conn, "cache_size", "-262144")?;
-    // mmap disabled: concurrent reader connections (health, scan-status) can
-    // trigger autocheckpoints that grow the main DB file, invalidating the
-    // writer's mmap window → SIGBUS. The 256 MB page cache is sufficient.
+    // mmap disabled on the writer: leave page-cache as the sole hot path.
+    // Re-enable cautiously — see the SIGBUS that was traced to two writer
+    // connections sharing the wal-index SHM mmap (smriti-serve held an rw
+    // connection while `smriti scan` ran). The fix moved smriti-serve to
+    // open_readonly + lazy-writer-per-scan; mmap on the writer is now safe
+    // in principle but the 256 MB page cache is enough for the working set.
     set_pragma(conn, "mmap_size", "0")?;
     set_pragma(conn, "temp_store", "2")?;
     // Leave wal_autocheckpoint at the default (1000 pages ~= 4 MB). Disabling
