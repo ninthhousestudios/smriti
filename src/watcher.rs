@@ -113,8 +113,9 @@ fn event_loop(
         match rx.recv_timeout(timeout) {
             Ok(event) => {
                 let now = Instant::now();
+                let cookie = event.tracker().unwrap_or(0) as u32;
                 for path in &event.paths {
-                    if let Some(kind) = map_notify_event(&event.kind) {
+                    if let Some(kind) = map_notify_event(&event.kind, cookie) {
                         tracing::debug!("debounce insert: {:?} {:?}", kind, path);
                         debounce.insert(path.clone(), kind, now);
                     }
@@ -150,8 +151,14 @@ fn event_loop(
     Ok(())
 }
 
-fn map_notify_event(kind: &EventKind) -> Option<FsEventKind> {
+fn map_notify_event(kind: &EventKind, cookie: u32) -> Option<FsEventKind> {
     match kind {
+        EventKind::Modify(notify::event::ModifyKind::Name(mode)) => match mode {
+            notify::event::RenameMode::From => Some(FsEventKind::MovedFrom { cookie }),
+            notify::event::RenameMode::To => Some(FsEventKind::MovedTo { cookie }),
+            notify::event::RenameMode::Both => None,
+            _ => Some(FsEventKind::Modify),
+        },
         EventKind::Create(_) => Some(FsEventKind::Create),
         EventKind::Modify(_) => Some(FsEventKind::Modify),
         EventKind::Remove(_) => Some(FsEventKind::Delete),
