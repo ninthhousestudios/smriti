@@ -10,6 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::envelope::FreshnessEnvelope;
 use crate::privacy::PrivacyGate;
 use crate::search;
 
@@ -102,6 +103,25 @@ pub struct HealthParams {}
 // Tool implementations
 // ---------------------------------------------------------------------------
 
+fn with_freshness(conn: &Connection, json: String) -> String {
+    let envelope = FreshnessEnvelope::from_watcher(conn);
+    if !envelope.is_stale {
+        return json;
+    }
+    let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return json;
+    };
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("is_stale".into(), true.into());
+        if let Some(reason) = &envelope.stale_reason {
+            obj.insert("stale_reason".into(), reason.clone().into());
+        }
+        serde_json::to_string(&val).unwrap_or(json)
+    } else {
+        json
+    }
+}
+
 #[tool_router]
 impl SmritiServer {
     pub fn new(db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
@@ -146,7 +166,7 @@ impl SmritiServer {
         let conn = self.db.lock().unwrap();
         let k = p.k.unwrap_or(10);
         match search::search_fts(&conn, &p.query, k, &self.config) {
-            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}")),
+            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
             Err(e) => format!("Search error: {e}"),
         }
     }
@@ -155,7 +175,7 @@ impl SmritiServer {
     async fn smriti_get(&self, Parameters(p): Parameters<GetParams>) -> String {
         let conn = self.db.lock().unwrap();
         match search::get_document(&conn, &p.content_hash, &self.config) {
-            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}")),
+            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
             Err(e) => format!("Not found: {e}"),
         }
     }
@@ -239,7 +259,7 @@ impl SmritiServer {
             Err(_) => {}
         }
 
-        serde_json::Value::Object(response).to_string()
+        with_freshness(&conn, serde_json::Value::Object(response).to_string())
     }
 
     #[tool(description = "Document structure: headings hierarchy for a single file.")]
@@ -266,21 +286,21 @@ impl SmritiServer {
             Err(e) => return format!("Error: {e}"),
         };
 
-        serde_json::json!({
+        with_freshness(&conn, serde_json::json!({
             "path": p.path,
             "content_hash": hash,
             "title": title,
             "summary": summary,
             "structure": structure_json.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
             "topics": topics_json.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
-        }).to_string()
+        }).to_string())
     }
 
     #[tool(description = "Lifecycle history of a file: events showing creates, moves, updates, deletes.")]
     async fn smriti_history(&self, Parameters(p): Parameters<HistoryParams>) -> String {
         let conn = self.db.lock().unwrap();
         match search::history(&conn, &p.path, p.since.as_deref(), p.until.as_deref(), &self.config) {
-            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}")),
+            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
             Err(e) => format!("History error: {e}"),
         }
     }
@@ -289,7 +309,7 @@ impl SmritiServer {
     async fn smriti_audit(&self, Parameters(p): Parameters<AuditParams>) -> String {
         let conn = self.db.lock().unwrap();
         match search::audit(&conn, p.min_bytes, p.sort_by.as_deref(), &self.config) {
-            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}")),
+            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
             Err(e) => format!("Audit error: {e}"),
         }
     }
@@ -299,7 +319,7 @@ impl SmritiServer {
         let conn = self.db.lock().unwrap();
         let format = p.format.as_deref().unwrap_or("paths");
         match search::manifest(&conn, format, &self.config) {
-            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}")),
+            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
             Err(e) => format!("Manifest error: {e}"),
         }
     }

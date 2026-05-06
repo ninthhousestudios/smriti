@@ -604,6 +604,76 @@ pub fn manifest(conn: &Connection, format: &str, config: &Config) -> Result<Mani
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
+pub struct WatcherStatus {
+    pub running: bool,
+    pub state: String,
+    pub pid: i64,
+    pub uptime_seconds: i64,
+    pub watch_count: i64,
+    pub pending_events: i64,
+    pub started_at: String,
+    pub updated_at: String,
+    pub last_event_processed_at: Option<String>,
+    pub last_full_scan_at: Option<String>,
+    pub last_full_scan_duration_ms: Option<i64>,
+}
+
+pub fn read_watcher_status(conn: &Connection) -> Result<Option<WatcherStatus>> {
+    let mut stmt = conn.prepare(
+        "SELECT pid, started_at, updated_at, state, watch_count, pending_events,
+                last_event_processed_at, last_full_scan_at, last_full_scan_duration_ms
+         FROM watcher_heartbeat WHERE id = 1"
+    )?;
+
+    let row = stmt.query_row([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+        ))
+    });
+
+    match row {
+        Ok((pid, started_at, updated_at, state, watch_count, pending_events,
+            last_event_processed_at, last_full_scan_at, last_full_scan_duration_ms)) => {
+            let updated = chrono::NaiveDateTime::parse_from_str(&updated_at, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|dt| dt.and_utc());
+            let started = chrono::NaiveDateTime::parse_from_str(&started_at, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|dt| dt.and_utc());
+
+            let now = Utc::now();
+            let stale = updated.map(|u| (now - u).num_seconds() > 30).unwrap_or(true);
+            let running = !stale && state != "stopped";
+            let uptime_seconds = started.map(|s| (now - s).num_seconds()).unwrap_or(0);
+
+            Ok(Some(WatcherStatus {
+                running,
+                state,
+                pid,
+                uptime_seconds,
+                watch_count,
+                pending_events,
+                started_at,
+                updated_at,
+                last_event_processed_at,
+                last_full_scan_at,
+                last_full_scan_duration_ms,
+            }))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(SmritiError::Db(e)),
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct HealthResult {
     pub status: String,
     pub db_path: String,
@@ -613,6 +683,8 @@ pub struct HealthResult {
     pub last_scan: Option<String>,
     pub embedder_ok: bool,
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watcher: Option<WatcherStatus>,
 }
 
 pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
@@ -632,6 +704,8 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
 
     let roots: Vec<String> = config.roots.iter().map(|r| r.to_string_lossy().to_string()).collect();
 
+    let watcher = read_watcher_status(conn).unwrap_or(None);
+
     Ok(HealthResult {
         status: "ok".to_string(),
         db_path: config.db_path.to_string_lossy().to_string(),
@@ -641,6 +715,7 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
         last_scan,
         embedder_ok: config.model_path.is_some(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        watcher,
     })
 }
 

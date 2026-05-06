@@ -161,6 +161,24 @@ fn update_heartbeat_scan_done(conn: &Connection, duration_ms: u64) -> Result<()>
     Ok(())
 }
 
+fn tick_heartbeat(conn: &Connection, pending_events: i64) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    conn.execute(
+        "UPDATE watcher_heartbeat SET updated_at = ?1, pending_events = ?2 WHERE id = 1",
+        params![now_str, pending_events],
+    )?;
+    Ok(())
+}
+
+fn mark_event_processed(conn: &Connection) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    conn.execute(
+        "UPDATE watcher_heartbeat SET last_event_processed_at = ?1, updated_at = ?1 WHERE id = 1",
+        params![now_str],
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Event loop
 // ---------------------------------------------------------------------------
@@ -181,10 +199,20 @@ fn event_loop(
     let mut debounce = DebounceBuffer::with_defaults();
     let fts_max = config.fts_content_max_bytes as usize;
     let scan_interval = Duration::from_secs(config.full_scan_interval_sec);
+    let heartbeat_interval = Duration::from_secs(5);
+    let mut last_heartbeat = Instant::now();
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
+        }
+
+        if last_heartbeat.elapsed() >= heartbeat_interval {
+            let pending = debounce.pending_count() as i64;
+            if let Err(e) = tick_heartbeat(conn, pending) {
+                tracing::warn!("heartbeat tick failed: {e}");
+            }
+            last_heartbeat = Instant::now();
         }
 
         // Periodic safety-net scan
@@ -258,6 +286,10 @@ fn event_loop(
 
             for fe in &flushed {
                 update_prev_paths(&mut prev_paths, fe);
+            }
+
+            if let Err(e) = mark_event_processed(conn) {
+                tracing::warn!("mark_event_processed failed: {e}");
             }
         }
     }

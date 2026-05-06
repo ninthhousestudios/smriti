@@ -500,6 +500,28 @@ fn cmd_health(config: &Config) -> Result<()> {
         }
     }
 
+    if let Some(ref w) = result.watcher {
+        println!();
+        println!("Watcher:");
+        println!("  Running:    {}", w.running);
+        println!("  State:      {}", w.state);
+        println!("  PID:        {}", w.pid);
+        println!("  Uptime:     {}s", w.uptime_seconds);
+        println!("  Watches:    {}", w.watch_count);
+        println!("  Pending:    {}", w.pending_events);
+        println!("  Updated:    {}", w.updated_at);
+        if let Some(ref ts) = w.last_event_processed_at {
+            println!("  Last event: {ts}");
+        }
+        if let Some(ref ts) = w.last_full_scan_at {
+            print!("  Last scan:  {ts}");
+            if let Some(ms) = w.last_full_scan_duration_ms {
+                print!(" ({ms}ms)");
+            }
+            println!();
+        }
+    }
+
     Ok(())
 }
 

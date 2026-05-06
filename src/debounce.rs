@@ -221,6 +221,10 @@ impl DebounceBuffer {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.pending_moves.is_empty()
     }
+
+    pub fn pending_count(&self) -> usize {
+        self.entries.len() + self.pending_moves.len()
+    }
 }
 
 #[cfg(test)]
