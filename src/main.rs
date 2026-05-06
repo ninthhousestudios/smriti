@@ -10,7 +10,7 @@ use smriti::roots;
 use smriti::search;
 
 #[derive(Parser)]
-#[command(name = "smriti", about = "Content-addressed filesystem indexer")]
+#[command(name = "smriti", about = "Content-addressed filesystem indexer", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
