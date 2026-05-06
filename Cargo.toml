@@ -76,3 +76,4 @@ embedding = ["ort", "tokenizers", "ndarray"]
 [dev-dependencies]
 tempfile = "3"
 assert_fs = "1"
+proptest = "1"

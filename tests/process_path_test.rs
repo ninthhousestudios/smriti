@@ -1,9 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use proptest::prelude::*;
 use smriti::config::Config;
 use smriti::db;
 use smriti::scanner::{
-    self, CurrentEntry, DocInfo, EventType, PathOutcome, PrevPathEntry,
+    self, CurrentEntry, DocInfo, EventType, PrevPathEntry,
 };
 use tempfile::TempDir;
 
@@ -146,7 +147,7 @@ fn process_path_idempotent() {
     let docs_after_first: i64 = conn
         .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
         .unwrap();
-    let paths_after_first: i64 = conn
+    let _paths_after_first: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL",
             [],
@@ -218,4 +219,129 @@ fn process_path_short_circuited_updates_scan_id() {
         )
         .unwrap();
     assert_eq!(last_seen, 2, "last_seen_scan should be updated to scan 2");
+}
+
+// ---------------------------------------------------------------------------
+// MinorChange event (frontmatter-only edit: content_hash changes, body_hash same)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn process_path_minor_change_when_only_frontmatter_changes() {
+    let (conn, _tmp) = setup_db();
+
+    let entry1 = make_entry("/tmp/root/a.md", "content_v1", "body_v1");
+    scanner::process_path(&conn, &entry1, None, None, 1, "2026-01-01 00:00:00").unwrap();
+
+    // Change content_hash (frontmatter changed) but keep body_hash the same
+    let entry2 = make_entry("/tmp/root/a.md", "content_v2", "body_v1");
+    let prev = PrevPathEntry {
+        content_hash: "content_v1".to_string(),
+        mtime: 1000,
+        size_bytes: 42,
+    };
+
+    let outcome = scanner::process_path(
+        &conn,
+        &entry2,
+        Some(&prev),
+        Some("body_v1"),
+        1,
+        "2026-01-01 00:00:00",
+    )
+    .unwrap();
+
+    let ev = outcome.event.expect("should emit MinorChange event");
+    assert_eq!(ev.event_type, EventType::MinorChange);
+}
+
+// ---------------------------------------------------------------------------
+// Proptest: idempotency with random inputs
+// ---------------------------------------------------------------------------
+
+fn snap_db(conn: &rusqlite::Connection) -> (i64, i64, i64) {
+    let docs: i64 = conn
+        .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+        .unwrap();
+    let active_paths: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    (docs, active_paths, events)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn process_path_idempotent_proptest(
+        content_hash in "[a-f0-9]{8,16}",
+        body_hash in "[a-f0-9]{8,16}",
+        has_prev in proptest::bool::ANY,
+        has_old_body in proptest::bool::ANY,
+        short_circuited in proptest::bool::ANY,
+    ) {
+        let (conn, _tmp) = setup_db();
+
+        let mut entry = make_entry("/tmp/root/test.txt", &content_hash, &body_hash);
+        entry.short_circuited = short_circuited;
+        if short_circuited {
+            entry.doc_info = None;
+        }
+
+        let prev = if has_prev {
+            Some(PrevPathEntry {
+                content_hash: if short_circuited { content_hash.clone() } else { "prev_hash".to_string() },
+                mtime: 1000,
+                size_bytes: 42,
+            })
+        } else {
+            None
+        };
+
+        let old_body = if has_old_body {
+            Some("old_body_hash".to_string())
+        } else {
+            None
+        };
+
+        // If short_circuited but no prev, the UPDATE WHERE path=... won't match
+        // anything — that's fine, it's a no-op edge case.
+
+        // First call
+        scanner::process_path(
+            &conn,
+            &entry,
+            prev.as_ref(),
+            old_body.as_deref(),
+            1,
+            "2026-01-01 00:00:00",
+        )
+        .unwrap();
+
+        let snap1 = snap_db(&conn);
+
+        // Second call with identical inputs
+        scanner::process_path(
+            &conn,
+            &entry,
+            prev.as_ref(),
+            old_body.as_deref(),
+            1,
+            "2026-01-01 00:00:00",
+        )
+        .unwrap();
+
+        let snap2 = snap_db(&conn);
+
+        prop_assert_eq!(snap1.0, snap2.0, "document count must be stable");
+        prop_assert_eq!(snap1.1, snap2.1, "active path count must be stable");
+        // Events may increase (each call inserts an event row if there's a state change),
+        // but document and path counts must be idempotent.
+    }
 }
