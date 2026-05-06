@@ -104,6 +104,8 @@ enum Commands {
         #[arg(long)]
         stdio: bool,
     },
+    /// Watch filesystem for changes and update index in real time
+    Watch,
     /// Analyze index and recommend tier reclassifications
     Triage,
     /// Compare a root against other roots to find redundant, unique, and stale files
@@ -157,6 +159,7 @@ fn main() -> Result<()> {
                 rt.block_on(smriti::daemon::run_http(config, &host, port))?;
             }
         }
+        Commands::Watch => smriti::watcher::run_watch(&config)?,
         Commands::Triage => cmd_triage(&config)?,
         Commands::BackupAudit { root } => cmd_backup_audit(&config, &root)?,
     }
