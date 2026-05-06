@@ -61,6 +61,9 @@ enum Commands {
         /// Search by file extension (e.g., .iso)
         #[arg(long)]
         ext: Option<String>,
+        /// Max results to display (default 200)
+        #[arg(long, default_value = "200")]
+        limit: u32,
     },
     /// Look up a document by content hash
     Get {
@@ -138,7 +141,7 @@ fn main() -> Result<()> {
         Commands::Scan { paths, jobs } => cmd_scan(&config, paths, jobs)?,
         Commands::Audit { min_bytes, sort_by, full, ext, tier2 } => cmd_audit(&config, min_bytes, sort_by, full, ext.as_deref(), tier2)?,
         Commands::Manifest { format } => cmd_manifest(&config, &format)?,
-        Commands::Find { query, k, path, ext } => cmd_find(&config, query.as_deref(), k, path.as_deref(), ext.as_deref())?,
+        Commands::Find { query, k, path, ext, limit } => cmd_find(&config, query.as_deref(), k, path.as_deref(), ext.as_deref(), limit)?,
         Commands::Get { content_hash } => cmd_get(&config, &content_hash)?,
         Commands::History { path, since, until } => cmd_history(&config, &path, since, until)?,
         Commands::Roots { action } => cmd_roots(action)?,
@@ -234,7 +237,7 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, f
     audit_config.roots = roots::load_roots(config)?;
 
     if let Some(ext) = ext {
-        let result = search::search_extension(&conn, ext, config)?;
+        let result = search::search_extension(&conn, ext, u32::MAX, config)?;
         return print_path_results(&result, &format!("extension .{}", ext.trim_start_matches('.')));
     }
 
@@ -326,16 +329,16 @@ fn cmd_manifest(config: &Config, format: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_find(config: &Config, query: Option<&str>, k: u32, path: Option<&str>, ext: Option<&str>) -> Result<()> {
+fn cmd_find(config: &Config, query: Option<&str>, k: u32, path: Option<&str>, ext: Option<&str>, limit: u32) -> Result<()> {
     let conn = smriti::db::open_readonly(&config.db_path)?;
 
     if let Some(ext) = ext {
-        let result = search::search_extension(&conn, ext, config)?;
+        let result = search::search_extension(&conn, ext, limit, config)?;
         return print_path_results(&result, &format!("extension .{}", ext.trim_start_matches('.')));
     }
 
     if let Some(pattern) = path {
-        let result = search::search_path(&conn, pattern, config)?;
+        let result = search::search_path(&conn, pattern, limit, config)?;
         return print_path_results(&result, &format!("path {pattern}"));
     }
 
@@ -371,10 +374,21 @@ fn print_path_results(result: &search::PathSearchResult, label: &str) -> Result<
     }
 
     let total_bytes: i64 = result.results.iter().map(|h| h.byte_size).sum();
-    println!("Found {} files matching {} ({}):\n", result.total_matched, label, format_bytes(total_bytes));
+    let showing = result.results.len();
+    let total = result.total_matched;
+
+    if showing < total {
+        println!("Showing {} of {} files matching {} ({} in shown):\n",
+            showing, total, label, format_bytes(total_bytes));
+    } else {
+        println!("Found {} files matching {} ({}):\n", total, label, format_bytes(total_bytes));
+    }
     for hit in &result.results {
         let size = format_bytes(hit.byte_size);
         println!("  {:<10}  {}", size, hit.path);
+    }
+    if showing < total {
+        println!("\n  ... {} more (use --limit to show more)", total - showing);
     }
 
     Ok(())

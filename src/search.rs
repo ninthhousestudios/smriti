@@ -116,23 +116,33 @@ pub struct PathSearchResult {
 pub fn search_path(
     conn: &Connection,
     pattern: &str,
+    limit: u32,
     config: &Config,
 ) -> Result<PathSearchResult> {
     let envelope = freshness_envelope(conn, config)?;
 
     let like_pattern = glob_to_like(pattern);
+    let esc = "\\";
+
+    let total_matched: usize = conn.query_row(
+        "SELECT COUNT(*) FROM paths p
+         JOIN documents d ON d.content_hash = p.content_hash
+         WHERE p.disappeared IS NULL AND p.path LIKE ?1 ESCAPE ?2",
+        params![like_pattern, esc],
+        |row| row.get(0),
+    )?;
 
     let mut stmt = conn.prepare(
         "SELECT p.path, COALESCE(d.byte_size, 0), p.content_hash, d.title
          FROM paths p
          JOIN documents d ON d.content_hash = p.content_hash
-         WHERE p.disappeared IS NULL AND p.path LIKE ?1 ESCAPE '\'
+         WHERE p.disappeared IS NULL AND p.path LIKE ?1 ESCAPE ?2
          ORDER BY d.byte_size DESC
-         LIMIT 200",
+         LIMIT ?3",
     )?;
 
     let mut results = Vec::new();
-    let mut rows = stmt.query(params![like_pattern])?;
+    let mut rows = stmt.query(params![like_pattern, esc, limit])?;
     while let Some(row) = rows.next()? {
         results.push(PathHit {
             path: row.get(0)?,
@@ -142,18 +152,26 @@ pub fn search_path(
         });
     }
 
-    let total_matched = results.len();
     Ok(PathSearchResult { results, total_matched, envelope })
 }
 
 pub fn search_extension(
     conn: &Connection,
     ext: &str,
+    limit: u32,
     config: &Config,
 ) -> Result<PathSearchResult> {
     let envelope = freshness_envelope(conn, config)?;
 
     let like_pattern = format!("%.{}", ext.trim_start_matches('.').to_lowercase());
+
+    let total_matched: usize = conn.query_row(
+        "SELECT COUNT(*) FROM paths p
+         JOIN documents d ON d.content_hash = p.content_hash
+         WHERE p.disappeared IS NULL AND LOWER(p.path) LIKE ?1",
+        params![like_pattern],
+        |row| row.get(0),
+    )?;
 
     let mut stmt = conn.prepare(
         "SELECT p.path, COALESCE(d.byte_size, 0), p.content_hash, d.title
@@ -161,11 +179,11 @@ pub fn search_extension(
          JOIN documents d ON d.content_hash = p.content_hash
          WHERE p.disappeared IS NULL AND LOWER(p.path) LIKE ?1
          ORDER BY d.byte_size DESC
-         LIMIT 200",
+         LIMIT ?2",
     )?;
 
     let mut results = Vec::new();
-    let mut rows = stmt.query(params![like_pattern])?;
+    let mut rows = stmt.query(params![like_pattern, limit])?;
     while let Some(row) = rows.next()? {
         results.push(PathHit {
             path: row.get(0)?,
@@ -175,7 +193,6 @@ pub fn search_extension(
         });
     }
 
-    let total_matched = results.len();
     Ok(PathSearchResult { results, total_matched, envelope })
 }
 

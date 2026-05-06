@@ -1,53 +1,88 @@
 # smriti
 
-*smriti* (स्मृति — "that which is remembered") is a content-addressed filesystem
-indexer. It tracks files by content identity (BLAKE3 hash), not by path, so it
-detects renames, copies, moves, and edits across scans.
+*smriti* (स्मृति — "that which is remembered") is the **filesystem perception
+layer** for agents and downstream tools. It maintains a content-addressed,
+allowlist-gated, audited index of what files exist under your chosen roots,
+where they live, and how they have changed over time.
 
-The first-order problem it solves: separating what you *created* from what tools
-*generated* on a large home directory, so backup tools can target only what
-matters.
+It is *not* a disk-usage analyzer (use [gdu](https://github.com/dundee/gdu) for
+that), not a desktop search engine, and not a document reader. It tracks files
+by their BLAKE3 content hash so identical content at different paths is
+recognized as the same document, and so moves, copies, hardlinks, and edits
+are detected across scans.
 
-smriti is the filesystem perception subsystem of
-[manas](https://github.com/josharp/manas) (मनस् — "mind"), a personal AI
-operating system.
+smriti is one tier of [manas](https://github.com/josharp/manas) (मनस् — "mind"),
+a personal AI operating system. It pairs with **kosha** (the document
+*comprehension* tier) to give agents a clean two-step model: *smriti finds the
+file; kosha reads what's inside*. See the
+[smriti+kosha architecture sketch](docs/smriti-kosha-architecture-sketch.md)
+for how the two compose.
 
-## What it does
+## What it does today
 
-- **Content-addressed indexing** — BLAKE3 hashes every tracked file. Identical
+- **Content-addressed indexing.** BLAKE3 hashes every tracked file. Identical
   content at different paths shares a single document record.
-- **Lifecycle events** — emits `created`, `updated`, `moved`, `copied`,
-  `deleted`, `hardlinked`, and `minor_change` (frontmatter-only edit) events.
-- **Two-tier classification** — every path under an allowlisted root is either
-  *indexed* (tier 1: hashed, metadata extracted, FTS-searchable) or *cataloged*
-  (tier 2: existence + size only). Secrets and noise are ignored entirely.
-- **Full-text search** — BM25 via SQLite FTS5 over title, topics, summary, and
-  file content.
-- **Privacy-first** — nothing is indexed until you explicitly add roots.
+- **Lifecycle events.** Emits `created`, `updated`, `moved`, `copied`,
+  `deleted`, `hardlinked`, and `minor_change` (frontmatter-only edit) events
+  to a persisted log.
+- **Two-tier classification.** Every path under an allowlisted root is either
+  *indexed* (tier 1: hashed, lightweight metadata extracted, FTS-searchable)
+  or *cataloged* (tier 2: existence + size only). Secrets and noise are
+  ignored entirely.
+- **Shallow text search.** BM25 via SQLite FTS5 over title, topics, summary,
+  and a capped excerpt of text-file content (default 100 KB,
+  `SMRITI_FTS_CONTENT_MAX_BYTES`). Good for *finding the file*. Not a
+  substitute for deep document search — see "Reach of search" below.
+- **Privacy-first access.** Nothing is indexed until you explicitly add roots.
   Hardened defaults block `.env`, `*.pem`, `*.key`, `id_rsa*`, `*.kdbx`,
-  `.ssh/`, `.gnupg/`, browser auth stores, and more.
-- **Backup manifest** — `smriti manifest` exports tier-1 paths for rsync,
-  restic, borg, or any tool that takes a file list.
-- **Triage** — `smriti triage` analyzes your index and recommends what to
+  `.ssh/`, `.gnupg/`, browser auth stores, and more. Every file read through
+  smriti's MCP interface is checked against the allowlist and logged to a
+  read audit table.
+- **Backup manifest.** `smriti manifest` exports tier-1 paths for rsync,
+  restic, borg, or any tool that takes a file list. An *inclusion-based*
+  backup story instead of the usual exclusion-based one.
+- **Triage.** `smriti triage` analyzes your index and recommends what to
   reclassify (regenerable build dirs, large media dirs, duplicates). Opens
-  recommendations in your `$EDITOR` for you to accept or modify.
-- **Backup audit** — `smriti backup-audit /mnt/usb` compares a root against
+  recommendations in your `$EDITOR` for you to accept or modify. Best
+  understood as **classifier maintenance** — codifying decisions into
+  `.smritiignore` so future scans respect them — not disk cleanup.
+- **Backup audit.** `smriti backup-audit /mnt/usb` compares a root against
   your other roots to find redundant, unique, and stale files.
-- **MCP server** — `smriti serve` runs a streamable HTTP MCP server for editor
-  and AI agent integration. All queries go through a privacy gate with a read
-  audit log.
+- **MCP server.** `smriti serve` runs a streamable HTTP MCP server for editor
+  and AI agent integration. All queries go through the privacy gate.
+
+## Reach of search — be honest
+
+smriti's search is a *file-finder*, not a *passage-finder*.
+
+| File type | What smriti indexes | What you can search on |
+|---|---|---|
+| Markdown / plain text (< 100 KB) | Title, summary, topics, content | All of it via FTS |
+| Markdown / plain text (> 100 KB) | Title, summary, topics, first 100 KB of content | Title/topics/summary + the excerpt |
+| Source code | Filename, size, mime | Path, name, extension. Use [sutra](https://github.com/josharp/manas) for code search. |
+| PDFs, epubs, docx, scanned books | **Filename, size, mime only** | Path, name, extension — **not** the document text |
+| Images, audio, video | Filename, size, mime | Path, name, extension |
+
+For deep search inside binary documents (PDFs, epubs), use **kosha**. smriti
+will tell you the file exists at `~/library/foo.pdf`; kosha will tell you what
+page 47 says.
 
 ## What it doesn't do
 
-- **No file watcher (yet)** — smriti scans on demand. There is no inotify
-  watcher that reacts to changes in real time (planned).
-- **No cloud sync** — everything is local. The SQLite database lives on your
+- **No deep document extraction.** PDFs and other binary formats are detected
+  as binary and indexed by filename + size only. Text extraction, OCR,
+  page-level retrieval, and citations live in kosha.
+- **No file watcher yet.** smriti scans on demand. An inotify/fanotify watcher
+  is on the roadmap.
+- **No cloud sync.** Everything is local. The SQLite database lives on your
   machine.
-- **No content storage** — smriti indexes metadata and hashes; it does not copy
-  or deduplicate file contents. Files stay where they are.
-- **No semantic/vector search by default** — dense embeddings (BGE-M3) are
-  behind a feature flag and require a model download. Out of the box, search is
-  BM25 only.
+- **No content storage.** smriti indexes metadata and hashes; it does not copy
+  or store file contents. Files stay where they are.
+- **No deep semantic search.** An optional dense-embedding feature flag exists
+  (BGE-M3 over the same shallow material as FTS), but for real semantic
+  retrieval over document content, kosha is the answer.
+- **No code intelligence.** That's [sutra](https://github.com/josharp/manas).
+- **No long-term memory of decisions or conversations.** That's chitta.
 
 ## Install
 
@@ -98,8 +133,8 @@ smriti serve
 | `smriti scan [--paths <path>...] [-j N]` | Scan allowlisted roots (or specific subtrees) |
 | `smriti scan-status` | Show status of the most recent scan |
 | `smriti find <query> [-k <n>]` | Full-text search (default k=10) |
-| `smriti find --path <glob>` | Search by path pattern (e.g., `"*.iso"`, `"~/Downloads/**"`) |
-| `smriti find --ext <ext>` | Search by file extension (e.g., `.iso`) |
+| `smriti find --path <glob> [--limit N]` | Search by path pattern (e.g., `"*.iso"`, `"~/Downloads/**"`) |
+| `smriti find --ext <ext> [--limit N]` | Search by file extension (e.g., `.iso`) |
 | `smriti get <content_hash>` | Look up a document by its BLAKE3 hash |
 | `smriti history <path>` | Show lifecycle events for a file |
 | `smriti audit` | Backup audit summary (top 5 extensions, top 5 tier-2) |
@@ -294,14 +329,45 @@ allowlist rules and logs every access.
 
 ## Planned
 
-- **`smriti watch`** — inotify/fanotify for incremental updates instead of
-  full rescans
-- **systemd user service** — run the server and watcher as persistent services
-- **Hybrid search in CLI/MCP** — `search_hybrid` (BM25 + dense, RRF merge)
-  exists in the codebase but isn't wired to commands yet
-- **Content blob store + revert** — store file versions, enable rollback
-- **Downstream subscriptions** — let other tools (grantha, agents) subscribe to
-  scan events
+The near-term direction is sharpening smriti's role as the *perception and
+access* tier of manas, and building the seam that lets **kosha** (document
+comprehension) sit cleanly on top of it. See
+[docs/smriti-kosha-architecture-sketch.md](docs/smriti-kosha-architecture-sketch.md)
+for the architectural framing and
+[docs/smriti-next-steps.md](docs/smriti-next-steps.md) for the work that flows
+from it.
+
+Headline items:
+
+- **Scan event subscriptions.** Expose the existing event log as a stream
+  consumers can poll (or, later, subscribe to) so that kosha and other
+  downstream tools react to file changes without re-walking the filesystem.
+  This is the load-bearing seam for the two-tier architecture.
+- **`smriti watch`.** Inotify/fanotify watcher for incremental updates instead
+  of full rescans. Designed to share an event shape with the subscription
+  stream above.
+- **systemd user service.** Run `smriti serve` and the watcher as persistent
+  services so the perception layer is always available to agents.
+- **Honest framing of the search story.** Document the FTS reach plainly
+  (text files only, capped excerpt) and stop implying smriti can search inside
+  PDFs. Decide whether to retire the smriti-side dense embedding feature flag
+  in favor of kosha owning deep semantic search.
+
+Why these and not other things: smriti's value is *perception that is cheap,
+complete, and safe*. Cheap so it can cover a whole home directory; complete so
+consumers don't reimplement filesystem walks; safe so agents can be given
+access without leaking secrets. Anything that strengthens those three is in
+scope. Deep document understanding, page-level retrieval, multimodal
+embeddings, and citation machinery are deliberately out of scope — those live
+in kosha.
+
+Speculative / not committed:
+
+- **Content blob store + revert.** Store file versions for rollback. Likely
+  collides with kosha's storage if not designed carefully; needs more thought.
+- **Hybrid search in CLI/MCP.** `search_hybrid` (BM25 + dense, RRF merge)
+  exists in the codebase but isn't wired to commands. May be retired in favor
+  of kosha if the dense path moves there entirely.
 
 ## Installing from source
 
