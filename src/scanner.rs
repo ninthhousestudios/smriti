@@ -734,7 +734,12 @@ pub fn scan(
     let (tier1, tier2, duration_ms) = finalize_scan(conn, &mut all_events, &finalize_ctx)?;
 
     db::restore_default_pragmas(conn)?;
-    crate::db::prune_audit_log(conn, config.audit_retention_days)?;
+    let audit_dir = config.db_path.parent().unwrap_or(std::path::Path::new("."));
+    if audit_dir.join("audit.db").exists() {
+        if let Ok(audit_conn) = crate::db::open_audit(audit_dir) {
+            let _ = crate::db::prune_audit_log(&audit_conn, config.audit_retention_days);
+        }
+    }
 
     Ok(ScanResult {
         tier1,

@@ -21,6 +21,7 @@ use crate::search;
 #[derive(Clone)]
 pub struct SmritiServer {
     db: Arc<Mutex<Connection>>,
+    audit_db: Arc<Mutex<Connection>>,
     config: Arc<Config>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -124,9 +125,10 @@ fn with_freshness(conn: &Connection, json: String) -> String {
 
 #[tool_router]
 impl SmritiServer {
-    pub fn new(db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
+    pub fn new(db: Arc<Mutex<Connection>>, audit_db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
         Self {
             db,
+            audit_db,
             config,
             tool_router: Self::tool_router(),
         }
@@ -183,6 +185,7 @@ impl SmritiServer {
     #[tool(description = "Read a tier-1 file through the privacy gate. Enforces allowlist and ignore rules.")]
     async fn smriti_read(&self, Parameters(p): Parameters<ReadParams>) -> String {
         let conn = self.db.lock().unwrap();
+        let audit_conn = self.audit_db.lock().unwrap();
         let config = &self.config;
 
         let roots = match crate::roots::load_roots(config) {
@@ -208,7 +211,7 @@ impl SmritiServer {
             Ok(g) => g,
             Err(e) => return format!("Privacy gate error: {e}"),
         };
-        match gate.read_file(&conn, std::path::Path::new(&path), Some("mcp")) {
+        match gate.read_file(&audit_conn, std::path::Path::new(&path), Some("mcp")) {
             Ok(result) => {
                 let is_binary = crate::metadata::is_binary(&result.content);
                 if is_binary {

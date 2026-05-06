@@ -2,6 +2,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::Utc;
 use rusqlite::{Connection, ffi::sqlite3_auto_extension};
 
 use crate::error::{Result, SmritiError};
@@ -135,6 +136,17 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         message: format!("0003_watcher_tables: {e}"),
     })?;
 
+    // 0004: drop read_audit from index.db (moved to audit.db).
+    let has_read_audit: bool = conn
+        .prepare("SELECT 1 FROM read_audit LIMIT 0")
+        .is_ok();
+    if has_read_audit {
+        let sql = include_str!("../migrations/0004_drop_read_audit.sql");
+        conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
+            message: format!("0004_drop_read_audit: {e}"),
+        })?;
+    }
+
     Ok(())
 }
 
@@ -163,6 +175,35 @@ fn writer_lock_path(db_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or(Path::new("."))
         .join("writer.lock")
+}
+
+pub fn open_audit(db_dir: &Path) -> Result<Connection> {
+    let path = db_dir.join("audit.db");
+    let conn = open_connection(&path)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS read_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            content_hash TEXT,
+            timestamp TIMESTAMP NOT NULL,
+            caller TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_read_audit_ts ON read_audit(timestamp);",
+    )
+    .map_err(|e| SmritiError::Migration {
+        message: format!("audit.db init: {e}"),
+    })?;
+    Ok(conn)
+}
+
+pub fn enqueue_scan(conn: &Connection, kind: &str, root: Option<&str>) -> Result<i64> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    conn.execute(
+        "INSERT INTO scan_requests (requested_at, kind, root) VALUES (?1, ?2, ?3)",
+        rusqlite::params![now_str, kind, root],
+    )?;
+    let id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+    Ok(id)
 }
 
 pub fn prune_events(conn: &Connection, older_than: Duration) -> Result<u64> {
@@ -228,7 +269,8 @@ mod tests {
 
     #[test]
     fn test_prune_keeps_recent() {
-        let conn = open(Path::new(":memory:")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_audit(dir.path()).unwrap();
         conn.execute(
             "INSERT INTO read_audit (path, timestamp) VALUES ('/tmp/x', datetime('now'))",
             [],

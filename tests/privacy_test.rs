@@ -104,10 +104,11 @@ fn test_tier1_read_allowed() {
     let file = root_dir.path().join("notes.md");
     write_file(&file, b"# My Notes\n\nSome content.");
 
-    let (conn, _db) = open_test_db();
+    let audit_dir = TempDir::new().unwrap();
+    let audit_conn = db::open_audit(audit_dir.path()).unwrap();
     let gate = make_gate(vec![root_dir.path().to_path_buf()], root_dir.path());
 
-    let result = gate.read_file(&conn, &file, None);
+    let result = gate.read_file(&audit_conn, &file, None);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.unwrap_err());
 
     let rr = result.unwrap();
@@ -128,24 +129,26 @@ fn test_read_audit_logging() {
     let file = root_dir.path().join("document.txt");
     write_file(&file, b"audit me");
 
-    let (conn, _db) = open_test_db();
+    let (_conn, _db) = open_test_db();
+    let audit_dir = TempDir::new().unwrap();
+    let audit_conn = db::open_audit(audit_dir.path()).unwrap();
     let gate = make_gate(vec![root_dir.path().to_path_buf()], root_dir.path());
 
     // No audit rows yet.
-    let before: i64 = conn
+    let before: i64 = audit_conn
         .query_row("SELECT COUNT(*) FROM read_audit", [], |r| r.get(0))
         .unwrap();
     assert_eq!(before, 0);
 
-    gate.read_file(&conn, &file, Some("test-caller")).unwrap();
+    gate.read_file(&audit_conn, &file, Some("test-caller")).unwrap();
 
-    let after: i64 = conn
+    let after: i64 = audit_conn
         .query_row("SELECT COUNT(*) FROM read_audit", [], |r| r.get(0))
         .unwrap();
     assert_eq!(after, 1, "exactly one audit row should be inserted per read");
 
     // Verify the stored values make sense.
-    let (stored_path, stored_caller): (String, Option<String>) = conn
+    let (stored_path, stored_caller): (String, Option<String>) = audit_conn
         .query_row(
             "SELECT path, caller FROM read_audit LIMIT 1",
             [],
@@ -160,8 +163,8 @@ fn test_read_audit_logging() {
     assert_eq!(stored_caller.as_deref(), Some("test-caller"));
 
     // A second read produces a second row.
-    gate.read_file(&conn, &file, None).unwrap();
-    let final_count: i64 = conn
+    gate.read_file(&audit_conn, &file, None).unwrap();
+    let final_count: i64 = audit_conn
         .query_row("SELECT COUNT(*) FROM read_audit", [], |r| r.get(0))
         .unwrap();
     assert_eq!(final_count, 2);
@@ -247,19 +250,20 @@ fn test_non_home_root() {
     let file = tmp_root.path().join("backup-manifest.txt");
     write_file(&file, b"file1.tar.gz\nfile2.tar.gz\n");
 
-    let (conn, _db) = open_test_db();
+    let audit_dir = TempDir::new().unwrap();
+    let audit_conn = db::open_audit(audit_dir.path()).unwrap();
     // Anchor hardened_defaults to the root so patterns don't accidentally
     // match the short /tmp path.
     let gate = make_gate(vec![tmp_root.path().to_path_buf()], tmp_root.path());
 
-    let result = gate.read_file(&conn, &file, Some("backup-agent"));
+    let result = gate.read_file(&audit_conn, &file, Some("backup-agent"));
     assert!(result.is_ok(), "non-home root should work; got: {:?}", result.unwrap_err());
 
     let rr = result.unwrap();
     assert_eq!(rr.content, b"file1.tar.gz\nfile2.tar.gz\n");
 
     // Confirm audit row recorded.
-    let count: i64 = conn
+    let count: i64 = audit_conn
         .query_row("SELECT COUNT(*) FROM read_audit", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 1);

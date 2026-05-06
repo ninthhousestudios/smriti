@@ -118,15 +118,10 @@ impl PrivacyGate {
         Ok(canonical)
     }
 
-    /// Record a successful read in the `read_audit` table.
-    ///
-    /// The `Connection` is caller-supplied rather than owned by the gate so
-    /// that both the daemon (which holds a long-lived connection behind a
-    /// Mutex) and the CLI (which opens a short-lived connection) can share a
-    /// single gate instance.
+    /// Record a successful read in the `read_audit` table in `audit.db`.
     pub fn log_read(
         &self,
-        conn: &Connection,
+        audit_conn: &Connection,
         path: &Path,
         content_hash: &str,
         caller: Option<&str>,
@@ -134,7 +129,7 @@ impl PrivacyGate {
         let timestamp = Utc::now().to_rfc3339();
         let path_str = path.display().to_string();
 
-        conn.execute(
+        audit_conn.execute(
             "INSERT INTO read_audit (path, content_hash, timestamp, caller) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![path_str, content_hash, timestamp, caller],
         )?;
@@ -144,15 +139,11 @@ impl PrivacyGate {
 
     /// Validate, read, hash, log, and return a file's contents.
     ///
-    /// Steps:
-    /// 1. `can_read` — allowlist + ignore check, resolves to canonical path.
-    /// 2. `std::fs::read` — load bytes.
-    /// 3. `hasher::hash_content` — blake3 hash.
-    /// 4. `log_read` — audit entry.
-    /// 5. Return [`ReadResult`].
+    /// The `audit_conn` is the writable connection to `audit.db` for logging.
+    /// The index `conn` is not used here but callers may need it for lookups.
     pub fn read_file(
         &self,
-        conn: &Connection,
+        audit_conn: &Connection,
         path: &Path,
         caller: Option<&str>,
     ) -> Result<ReadResult> {
@@ -161,7 +152,7 @@ impl PrivacyGate {
         let content = std::fs::read(&canonical).map_err(SmritiError::Io)?;
         let content_hash = hash_content(&content);
 
-        self.log_read(conn, &canonical, &content_hash, caller)?;
+        self.log_read(audit_conn, &canonical, &content_hash, caller)?;
 
         Ok(ReadResult { content, content_hash })
     }

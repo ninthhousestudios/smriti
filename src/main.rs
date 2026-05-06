@@ -472,7 +472,14 @@ fn cmd_prune(config: &Config, older_than: Option<String>) -> Result<()> {
         .unwrap_or(std::time::Duration::from_secs(30 * 86400));
 
     let events_pruned = smriti::db::prune_events(&conn, threshold)?;
-    let audit_pruned = smriti::db::prune_audit_log(&conn, config.audit_retention_days)?;
+
+    let audit_dir = config.db_path.parent().unwrap_or(std::path::Path::new("."));
+    let audit_pruned = if audit_dir.join("audit.db").exists() {
+        let audit_conn = smriti::db::open_audit(audit_dir)?;
+        smriti::db::prune_audit_log(&audit_conn, config.audit_retention_days)?
+    } else {
+        0
+    };
 
     println!("Pruned {events_pruned} old events, {audit_pruned} audit log entries.");
     Ok(())
