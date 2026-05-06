@@ -225,6 +225,29 @@ impl DebounceBuffer {
     pub fn pending_count(&self) -> usize {
         self.entries.len() + self.pending_moves.len()
     }
+
+    pub fn flush_all(&mut self) -> Vec<FlushedEvent> {
+        let mut flushed = Vec::new();
+
+        for (_, pm) in self.pending_moves.drain() {
+            flushed.push(FlushedEvent {
+                path: pm.from_path,
+                kind: FlushedKind::Delete,
+            });
+        }
+
+        for (path, entry) in self.entries.drain() {
+            let kind = match entry.kind {
+                BufferedKind::Create => FlushedKind::Create,
+                BufferedKind::Modify => FlushedKind::Modify,
+                BufferedKind::Delete => FlushedKind::Delete,
+                BufferedKind::Moved { from } => FlushedKind::Moved { from },
+            };
+            flushed.push(FlushedEvent { path, kind });
+        }
+
+        flushed
+    }
 }
 
 #[cfg(test)]
@@ -407,5 +430,21 @@ mod tests {
                 from: path("/a.txt")
             }
         );
+    }
+
+    #[test]
+    fn flush_all_drains_everything() {
+        let mut buf = DebounceBuffer::new(ms(1000), ms(5000), ms(100), ms(1000));
+        let t0 = Instant::now();
+
+        buf.insert(path("/a.txt"), FsEventKind::Create, t0);
+        buf.insert(path("/b.txt"), FsEventKind::Modify, t0);
+        buf.insert(path("/gone.txt"), FsEventKind::MovedFrom { cookie: 99 }, t0);
+
+        assert!(buf.flush(t0).is_empty(), "normal flush too early");
+
+        let flushed = buf.flush_all();
+        assert_eq!(flushed.len(), 3);
+        assert!(buf.is_empty(), "buffer should be empty after flush_all");
     }
 }

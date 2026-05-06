@@ -14,6 +14,7 @@ pub struct Config {
     pub audit_retention_days: u64,
     pub scan_batch_size: usize,
     pub full_scan_interval_sec: u64,
+    pub shutdown_drain_ms: u64,
 }
 
 impl Config {
@@ -47,6 +48,7 @@ impl Config {
         let audit_retention_days = parse_env_or("SMRITI_AUDIT_RETENTION_DAYS", 30u64)?;
         let scan_batch_size = parse_env_or("SMRITI_SCAN_BATCH_SIZE", 2000usize)?;
         let full_scan_interval_sec = parse_env_or("SMRITI_WATCH_FULL_SCAN_INTERVAL", 86400u64)?;
+        let shutdown_drain_ms = parse_env_or("SMRITI_WATCH_SHUTDOWN_DRAIN_MS", 10000u64)?;
 
         Ok(Self {
             db_path,
@@ -59,6 +61,7 @@ impl Config {
             audit_retention_days,
             scan_batch_size,
             full_scan_interval_sec,
+            shutdown_drain_ms,
         })
     }
 }

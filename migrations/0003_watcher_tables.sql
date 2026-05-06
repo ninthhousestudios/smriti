@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS watcher_heartbeat (
     started_at              TIMESTAMP NOT NULL,
     updated_at              TIMESTAMP NOT NULL,
     state                   TEXT NOT NULL DEFAULT 'starting'
-                            CHECK (state IN ('starting', 'watching', 'scanning', 'stopped')),
+                            CHECK (state IN ('starting', 'watching', 'scanning', 'stopping', 'reconciling', 'stopped')),
     watch_count             INTEGER NOT NULL DEFAULT 0,
     pending_events          INTEGER NOT NULL DEFAULT 0,
     last_event_processed_at TIMESTAMP,

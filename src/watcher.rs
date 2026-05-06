@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,12 @@ extern "C" fn signal_handler(_: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
 
+enum WatcherMsg {
+    Event(notify::Event),
+    Overflow,
+    Error(String),
+}
+
 pub fn run_watch(config: &Config) -> Result<()> {
     SHUTDOWN.store(false, Ordering::SeqCst);
 
@@ -43,18 +49,29 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
 
     recover_crashed_scans(&conn)?;
 
-    let roots = crate::roots::load_roots(config)?;
+    let mut roots = crate::roots::load_roots(config)?;
     if roots.is_empty() {
         return Err(SmritiError::NoRoots);
     }
 
     let global_rules = ignore::load_user_smritiignore();
 
-    // Register inotify watches BEFORE scan so nothing falls through the gap
+    detect_network_mounts(&roots);
+
     let (tx, rx) = std::sync::mpsc::channel();
+    let tx_clone = tx.clone();
     let mut watcher = notify::recommended_watcher(move |res: std::result::Result<notify::Event, notify::Error>| {
-        if let Ok(event) = res {
-            let _ = tx.send(event);
+        match res {
+            Ok(event) => { let _ = tx_clone.send(WatcherMsg::Event(event)); }
+            Err(e) => {
+                if e.to_string().contains("queue overflow")
+                    || e.to_string().contains("Q_OVERFLOW")
+                {
+                    let _ = tx_clone.send(WatcherMsg::Overflow);
+                } else {
+                    let _ = tx_clone.send(WatcherMsg::Error(e.to_string()));
+                }
+            }
         }
     })
     .map_err(|e| SmritiError::Other(format!("Failed to create watcher: {e}")))?;
@@ -62,9 +79,7 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
     let mut watch_count: i64 = 0;
     for root in &roots {
         if root.is_dir() {
-            watcher
-                .watch(root, RecursiveMode::Recursive)
-                .map_err(|e| SmritiError::Other(format!("Failed to watch {}: {e}", root.display())))?;
+            watch_root_checked(&mut watcher, root)?;
             tracing::info!("watching {}", root.display());
             watch_count += 1;
         } else {
@@ -72,9 +87,18 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
         }
     }
 
+    // Watch the roots.conf parent directory for dynamic root changes
+    let roots_conf = crate::roots::roots_conf_path();
+    if let Some(roots_dir) = roots_conf.parent() {
+        if roots_dir.is_dir() {
+            if let Err(e) = watcher.watch(roots_dir, RecursiveMode::NonRecursive) {
+                tracing::warn!("cannot watch roots config dir {}: {e}", roots_dir.display());
+            }
+        }
+    }
+
     upsert_heartbeat(&conn, "scanning", watch_count)?;
 
-    // Startup full scan — config needs resolved roots
     let mut scan_config = config.clone();
     scan_config.roots = roots.clone();
     let mut last_full_scan = Instant::now();
@@ -106,7 +130,8 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
     tracing::info!("watching, {} roots, {} known paths, scan_id={}", roots.len(), prev_paths.len(), watcher_scan_id);
 
     event_loop(
-        &mut conn, config, &scan_config, &rx, &roots, &global_rules,
+        &mut conn, config, &mut scan_config, &rx, &mut watcher,
+        &mut roots, &global_rules,
         prev_paths, old_body_hashes, watcher_scan_id, shutdown, last_full_scan,
     )?;
 
@@ -161,6 +186,15 @@ fn update_heartbeat_scan_done(conn: &Connection, duration_ms: u64) -> Result<()>
     Ok(())
 }
 
+fn update_heartbeat_watch_count(conn: &Connection, watch_count: i64) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    conn.execute(
+        "UPDATE watcher_heartbeat SET watch_count = ?1, updated_at = ?2 WHERE id = 1",
+        params![watch_count, now_str],
+    )?;
+    Ok(())
+}
+
 fn tick_heartbeat(conn: &Connection, pending_events: i64) -> Result<()> {
     let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     conn.execute(
@@ -180,15 +214,232 @@ fn mark_event_processed(conn: &Connection) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Resilience: watch limit, network mounts
+// ---------------------------------------------------------------------------
+
+fn watch_root_checked(watcher: &mut notify::RecommendedWatcher, root: &Path) -> Result<()> {
+    watcher.watch(root, RecursiveMode::Recursive).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("No space left on device") || msg.contains("max_user_watches") {
+            let current_limit = std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+                .unwrap_or_else(|_| "unknown".to_string())
+                .trim()
+                .to_string();
+            let dir_count = WalkDir::new(root)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_dir())
+                .count();
+            SmritiError::Other(format!(
+                "inotify watch limit exhausted while watching {root}.\n\
+                 Current limit: {current_limit}\n\
+                 Directories in this root: {dir_count}\n\
+                 To increase, run:\n  \
+                 sudo sysctl fs.inotify.max_user_watches=524288\n  \
+                 echo 'fs.inotify.max_user_watches=524288' | sudo tee -a /etc/sysctl.conf",
+                root = root.display(),
+            ))
+        } else {
+            SmritiError::Other(format!("Failed to watch {}: {e}", root.display()))
+        }
+    })
+}
+
+fn detect_network_mounts(roots: &[PathBuf]) {
+    let mounts = match std::fs::read_to_string("/proc/mounts") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let network_fs = ["nfs", "nfs4", "cifs", "smbfs", "sshfs"];
+
+    for line in mounts.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let mount_point = Path::new(parts[1]);
+        let fs_type = parts[2];
+
+        let is_network = network_fs.contains(&fs_type) || fs_type.starts_with("fuse.");
+
+        if is_network {
+            for root in roots {
+                if root.starts_with(mount_point) {
+                    tracing::warn!(
+                        "root {} is on {fs_type} filesystem (mount: {}); \
+                         inotify may not detect remote changes — periodic scan will catch them",
+                        root.display(),
+                        mount_point.display(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Roots reconciliation
+// ---------------------------------------------------------------------------
+
+fn reconcile_roots(
+    watcher: &mut notify::RecommendedWatcher,
+    conn: &mut Connection,
+    config: &Config,
+    scan_config: &mut Config,
+    roots: &mut Vec<PathBuf>,
+    global_rules: &SectionRules,
+    prev_paths: &mut HashMap<PathBuf, PrevPathEntry>,
+    old_body_hashes: &mut HashMap<String, String>,
+    scan_id: &mut i64,
+    last_full_scan: &mut Instant,
+) -> Result<()> {
+    let new_roots = crate::roots::load_roots(config)?;
+    let current_set: HashSet<&PathBuf> = roots.iter().collect();
+    let new_set: HashSet<&PathBuf> = new_roots.iter().collect();
+
+    if current_set == new_set {
+        return Ok(());
+    }
+
+    let removed: Vec<PathBuf> = current_set.difference(&new_set).map(|p| (*p).clone()).collect();
+    let added: Vec<PathBuf> = new_set.difference(&current_set).map(|p| (*p).clone()).collect();
+
+    for root in &removed {
+        if let Err(e) = watcher.unwatch(root) {
+            tracing::warn!("failed to unwatch {}: {e}", root.display());
+        } else {
+            tracing::info!("unwatched removed/disabled root: {}", root.display());
+        }
+    }
+
+    let mut scan_roots: Vec<PathBuf> = Vec::new();
+    for root in &added {
+        if root.is_dir() {
+            match watch_root_checked(watcher, root) {
+                Ok(()) => {
+                    tracing::info!("watching new/enabled root: {}", root.display());
+                    scan_roots.push(root.clone());
+                }
+                Err(e) => {
+                    tracing::error!("failed to watch new root {}: {e}", root.display());
+                }
+            }
+        } else {
+            tracing::warn!("skipping non-directory root: {}", root.display());
+        }
+    }
+
+    *roots = new_roots;
+    scan_config.roots = roots.clone();
+
+    let watch_count = roots.iter().filter(|r| r.is_dir()).count() as i64;
+    update_heartbeat_watch_count(conn, watch_count)?;
+
+    if !scan_roots.is_empty() {
+        tracing::info!("scanning {} newly added root(s)", scan_roots.len());
+        update_heartbeat_state(conn, "scanning")?;
+
+        let mut root_scan_config = config.clone();
+        root_scan_config.roots = scan_roots;
+        match scanner::scan(conn, &root_scan_config, global_rules) {
+            Ok(result) => {
+                tracing::info!(
+                    "roots reconciliation scan: {} created, {} updated, {} deleted in {}ms",
+                    result.tier1.created, result.tier1.updated, result.tier1.deleted, result.duration_ms,
+                );
+                update_heartbeat_scan_done(conn, result.duration_ms)?;
+            }
+            Err(e) => {
+                tracing::error!("roots reconciliation scan failed: {e}");
+                update_heartbeat_state(conn, "watching")?;
+            }
+        }
+
+        *prev_paths = scanner::load_prev_paths(conn)?;
+        *old_body_hashes = scanner::load_old_body_hashes(conn)?;
+        *last_full_scan = Instant::now();
+
+        let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        conn.execute(
+            "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
+            params![now_str],
+        )?;
+        *scan_id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+    }
+
+    tracing::info!("roots reconciled: {} active roots", roots.len());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown drain
+// ---------------------------------------------------------------------------
+
+fn abort_running_scans(conn: &Connection, current_scan_id: i64) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let count = conn.execute(
+        "UPDATE scan_runs SET status = 'failed', finished_at = ?1, error = 'shutdown' WHERE status = 'running'",
+        params![now_str],
+    )?;
+    if count > 0 {
+        tracing::info!("shutdown: aborted {} running scan_run(s) (including scan_id={})", count, current_scan_id);
+    }
+    Ok(())
+}
+
+fn drain_shutdown(
+    conn: &mut Connection,
+    config: &Config,
+    debounce: &mut DebounceBuffer,
+    roots: &[PathBuf],
+    global_rules: &SectionRules,
+    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
+    old_body_hashes: &HashMap<String, String>,
+    fts_max: usize,
+    scan_id: i64,
+) -> Result<()> {
+    update_heartbeat_state(conn, "stopping")?;
+
+    let drain_deadline = Instant::now() + Duration::from_millis(config.shutdown_drain_ms);
+    let flushed = debounce.flush_all();
+
+    if !flushed.is_empty() {
+        tracing::info!("draining {} pending events (deadline {}ms)", flushed.len(), config.shutdown_drain_ms);
+        let tx = conn.transaction().map_err(SmritiError::Db)?;
+        for fe in &flushed {
+            if Instant::now() >= drain_deadline {
+                tracing::warn!("drain deadline exceeded, dropping remaining events");
+                break;
+            }
+            if let Err(e) = process_flushed(
+                &tx, config, fe, roots, global_rules, prev_paths, old_body_hashes, fts_max, scan_id,
+            ) {
+                tracing::error!("drain processing {}: {e}", fe.path.display());
+            }
+        }
+        if let Err(e) = tx.commit() {
+            tracing::error!("drain commit failed: {e}");
+        }
+    }
+
+    abort_running_scans(conn, scan_id)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Event loop
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn event_loop(
     conn: &mut Connection,
     config: &Config,
-    scan_config: &Config,
-    rx: &std::sync::mpsc::Receiver<notify::Event>,
-    roots: &[PathBuf],
+    scan_config: &mut Config,
+    rx: &std::sync::mpsc::Receiver<WatcherMsg>,
+    watcher: &mut notify::RecommendedWatcher,
+    roots: &mut Vec<PathBuf>,
     global_rules: &SectionRules,
     mut prev_paths: HashMap<PathBuf, PrevPathEntry>,
     mut old_body_hashes: HashMap<String, String>,
@@ -204,8 +455,17 @@ fn event_loop(
     let scan_req_interval = Duration::from_secs(1);
     let mut last_scan_req_check = Instant::now();
 
+    let roots_conf = crate::roots::roots_conf_path();
+    let mut roots_changed = false;
+    let mut last_roots_change = Instant::now();
+    let roots_debounce = Duration::from_secs(1);
+
     loop {
         if shutdown.load(Ordering::SeqCst) {
+            drain_shutdown(
+                conn, config, &mut debounce, roots, global_rules,
+                &prev_paths, &old_body_hashes, fts_max, scan_id,
+            )?;
             break;
         }
 
@@ -215,6 +475,17 @@ fn event_loop(
                 tracing::warn!("heartbeat tick failed: {e}");
             }
             last_heartbeat = Instant::now();
+        }
+
+        // Roots reconciliation (debounced)
+        if roots_changed && last_roots_change.elapsed() >= roots_debounce {
+            roots_changed = false;
+            if let Err(e) = reconcile_roots(
+                watcher, conn, config, scan_config, roots, global_rules,
+                &mut prev_paths, &mut old_body_hashes, &mut scan_id, &mut last_full_scan,
+            ) {
+                tracing::error!("roots reconciliation failed: {e}");
+            }
         }
 
         // Drain pending scan_requests
@@ -305,18 +576,65 @@ fn event_loop(
             .unwrap_or(Duration::from_secs(1));
 
         match rx.recv_timeout(timeout) {
-            Ok(event) => {
+            Ok(WatcherMsg::Event(event)) => {
+                // Detect roots.conf changes
+                if event.paths.iter().any(|p| *p == roots_conf) {
+                    roots_changed = true;
+                    last_roots_change = Instant::now();
+                }
+
                 let now = Instant::now();
                 let cookie = event.tracker().unwrap_or(0) as u32;
                 for path in &event.paths {
+                    if *path == roots_conf {
+                        continue;
+                    }
                     if let Some(kind) = map_notify_event(&event.kind, cookie) {
                         tracing::debug!("debounce insert: {:?} {:?}", kind, path);
                         debounce.insert(path.clone(), kind, now);
                     }
                 }
             }
+            Ok(WatcherMsg::Overflow) => {
+                tracing::warn!("inotify queue overflow detected, triggering full reconciliation scan");
+                update_heartbeat_state(conn, "reconciling")?;
+
+                match scanner::scan(conn, scan_config, global_rules) {
+                    Ok(result) => {
+                        tracing::info!(
+                            "overflow reconciliation: {} created, {} updated, {} deleted in {}ms",
+                            result.tier1.created, result.tier1.updated, result.tier1.deleted, result.duration_ms,
+                        );
+                        update_heartbeat_scan_done(conn, result.duration_ms)?;
+                    }
+                    Err(e) => {
+                        tracing::error!("overflow reconciliation scan failed: {e}");
+                        update_heartbeat_state(conn, "watching")?;
+                    }
+                }
+
+                prev_paths = scanner::load_prev_paths(conn)?;
+                old_body_hashes = scanner::load_old_body_hashes(conn)?;
+                last_full_scan = Instant::now();
+
+                let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                conn.execute(
+                    "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
+                    params![now_str],
+                )?;
+                scan_id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+            }
+            Ok(WatcherMsg::Error(msg)) => {
+                tracing::warn!("watcher error: {msg}");
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                drain_shutdown(
+                    conn, config, &mut debounce, roots, global_rules,
+                    &prev_paths, &old_body_hashes, fts_max, scan_id,
+                )?;
+                break;
+            }
         }
 
         let now = Instant::now();

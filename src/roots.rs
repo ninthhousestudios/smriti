@@ -8,7 +8,7 @@ pub struct RootEntry {
     pub enabled: bool,
 }
 
-fn roots_conf_path() -> PathBuf {
+pub fn roots_conf_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".smriti").join("roots.conf")
 }

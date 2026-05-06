@@ -21,6 +21,7 @@ fn make_config(roots: Vec<std::path::PathBuf>) -> (Config, TempDir) {
         audit_retention_days: 30,
         scan_batch_size: 3,
         full_scan_interval_sec: 86400,
+        shutdown_drain_ms: 10000,
     };
     (config, db_tmp)
 }

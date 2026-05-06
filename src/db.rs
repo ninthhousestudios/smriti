@@ -136,6 +136,22 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         message: format!("0003_watcher_tables: {e}"),
     })?;
 
+    // 0005: add 'stopping' and 'reconciling' states to watcher_heartbeat.
+    let has_new_states: bool = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='watcher_heartbeat'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .map(|sql| sql.contains("stopping"))
+        .unwrap_or(false);
+    if !has_new_states {
+        let sql = include_str!("../migrations/0005_heartbeat_states.sql");
+        conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
+            message: format!("0005_heartbeat_states: {e}"),
+        })?;
+    }
+
     // 0004: drop read_audit from index.db (moved to audit.db).
     let has_read_audit: bool = conn
         .prepare("SELECT 1 FROM read_audit LIMIT 0")

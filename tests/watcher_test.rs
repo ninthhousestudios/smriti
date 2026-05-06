@@ -19,6 +19,7 @@ fn make_config(db_dir: &TempDir, root: &TempDir) -> Config {
         audit_retention_days: 30,
         scan_batch_size: 500,
         full_scan_interval_sec: 86400,
+        shutdown_drain_ms: 10000,
     }
 }
 
@@ -518,4 +519,79 @@ fn watcher_drains_scan_request() {
 
     shutdown.store(true, Ordering::SeqCst);
     let _ = handle.join();
+}
+
+#[test]
+fn watcher_graceful_shutdown_drains_pending_events() {
+    let db_dir = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let config = make_config(&db_dir, &root);
+    let root_path = root.path().to_path_buf();
+
+    let _conn = db::open(&config.db_path).unwrap();
+    drop(_conn);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        watcher::run_watch_with_shutdown(&config_clone, &shutdown_clone)
+    });
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Create a file and immediately signal shutdown, before debounce can flush
+    std::fs::write(root_path.join("drain-me.txt"), "drain test").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    shutdown.store(true, Ordering::SeqCst);
+
+    let _ = handle.join();
+
+    let conn = db::open_readonly(&config.db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE path LIKE '%drain-me.txt' AND disappeared IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "graceful shutdown should drain pending events");
+
+    let state: String = conn
+        .query_row("SELECT state FROM watcher_heartbeat WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "stopped", "heartbeat should be 'stopped' after graceful shutdown");
+}
+
+#[test]
+fn watcher_shutdown_aborts_running_scan_runs() {
+    let db_dir = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let config = make_config(&db_dir, &root);
+
+    let _conn = db::open(&config.db_path).unwrap();
+    drop(_conn);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        watcher::run_watch_with_shutdown(&config_clone, &shutdown_clone)
+    });
+
+    std::thread::sleep(Duration::from_millis(3000));
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = handle.join();
+
+    let conn = db::open_readonly(&config.db_path).unwrap();
+    let shutdown_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM scan_runs WHERE error = 'shutdown'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(shutdown_count >= 1, "at least one scan_run should be marked with shutdown error");
 }

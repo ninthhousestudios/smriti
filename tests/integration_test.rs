@@ -24,6 +24,7 @@ fn test_config(tmp: &TempDir) -> Config {
         audit_retention_days: 30,
         scan_batch_size: 500,
         full_scan_interval_sec: 86400,
+        shutdown_drain_ms: 10000,
     }
 }
 
