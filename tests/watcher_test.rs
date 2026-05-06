@@ -18,6 +18,7 @@ fn make_config(db_dir: &TempDir, root: &TempDir) -> Config {
         max_metadata_bytes: 524288000,
         audit_retention_days: 30,
         scan_batch_size: 500,
+        full_scan_interval_sec: 86400,
     }
 }
 
@@ -328,4 +329,144 @@ fn watcher_atomic_write_via_rename() {
         )
         .unwrap();
     assert_eq!(tmp_active, 0, "tmp file should not remain as active path");
+}
+
+#[test]
+fn watcher_startup_scan_indexes_preexisting_files() {
+    let db_dir = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let config = make_config(&db_dir, &root);
+
+    // Create files BEFORE starting the watcher
+    std::fs::write(root.path().join("alpha.txt"), "aaa").unwrap();
+    std::fs::write(root.path().join("beta.txt"), "bbb").unwrap();
+    let sub = root.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("gamma.txt"), "ccc").unwrap();
+
+    let _conn = db::open(&config.db_path).unwrap();
+    drop(_conn);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        watcher::run_watch_with_shutdown(&config_clone, &shutdown_clone)
+    });
+
+    // Give watcher time for startup scan + settling
+    std::thread::sleep(Duration::from_millis(3000));
+
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = handle.join();
+
+    let conn = db::open_readonly(&config.db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 3, "startup scan should index all 3 pre-existing files");
+
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM watcher_heartbeat WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "stopped", "heartbeat should be 'stopped' after shutdown");
+}
+
+#[test]
+fn watcher_crash_recovery_marks_running_scans_failed() {
+    let db_dir = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let config = make_config(&db_dir, &root);
+
+    // Set up DB and insert a fake "running" scan_run (simulating a crash)
+    {
+        let conn = db::open(&config.db_path).unwrap();
+        conn.execute(
+            "INSERT INTO scan_runs (started_at, status) VALUES ('2026-01-01 00:00:00', 'running')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_runs (started_at, status) VALUES ('2026-01-01 01:00:00', 'running')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        watcher::run_watch_with_shutdown(&config_clone, &shutdown_clone)
+    });
+
+    std::thread::sleep(Duration::from_millis(2000));
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = handle.join();
+
+    let conn = db::open_readonly(&config.db_path).unwrap();
+    let crashed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM scan_runs WHERE error = 'watcher restarted'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(crashed, 2, "both stale running scans should be marked as failed");
+}
+
+#[test]
+fn watcher_heartbeat_reflects_scanning_then_watching() {
+    let db_dir = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let config = make_config(&db_dir, &root);
+
+    // Add some files so the scan takes a moment
+    for i in 0..10 {
+        std::fs::write(root.path().join(format!("file{i}.txt")), format!("content {i}")).unwrap();
+    }
+
+    let _conn = db::open(&config.db_path).unwrap();
+    drop(_conn);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        watcher::run_watch_with_shutdown(&config_clone, &shutdown_clone)
+    });
+
+    // Wait for startup scan to complete and enter watching
+    std::thread::sleep(Duration::from_millis(3000));
+
+    {
+        let conn = db::open_readonly(&config.db_path).unwrap();
+        let state: String = conn
+            .query_row("SELECT state FROM watcher_heartbeat WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, "watching", "should be in watching state after startup scan");
+
+        let last_scan: Option<String> = conn
+            .query_row(
+                "SELECT last_full_scan_at FROM watcher_heartbeat WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(last_scan.is_some(), "last_full_scan_at should be set after startup scan");
+    }
+
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = handle.join();
 }

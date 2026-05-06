@@ -41,6 +41,8 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
 
     let mut conn = db::open(&config.db_path)?;
 
+    recover_crashed_scans(&conn)?;
+
     let roots = crate::roots::load_roots(config)?;
     if roots.is_empty() {
         return Err(SmritiError::NoRoots);
@@ -48,6 +50,7 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
 
     let global_rules = ignore::load_user_smritiignore();
 
+    // Register inotify watches BEFORE scan so nothing falls through the gap
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res: std::result::Result<notify::Event, notify::Error>| {
         if let Ok(event) = res {
@@ -56,16 +59,42 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
     })
     .map_err(|e| SmritiError::Other(format!("Failed to create watcher: {e}")))?;
 
+    let mut watch_count: i64 = 0;
     for root in &roots {
         if root.is_dir() {
             watcher
                 .watch(root, RecursiveMode::Recursive)
                 .map_err(|e| SmritiError::Other(format!("Failed to watch {}: {e}", root.display())))?;
             tracing::info!("watching {}", root.display());
+            watch_count += 1;
         } else {
             tracing::warn!("skipping non-directory root: {}", root.display());
         }
     }
+
+    upsert_heartbeat(&conn, "scanning", watch_count)?;
+
+    // Startup full scan — config needs resolved roots
+    let mut scan_config = config.clone();
+    scan_config.roots = roots.clone();
+    let mut last_full_scan = Instant::now();
+    match scanner::scan(&mut conn, &scan_config, &global_rules) {
+        Ok(result) => {
+            tracing::info!(
+                "startup scan: {} created, {} updated, {} deleted in {}ms",
+                result.tier1.created, result.tier1.updated, result.tier1.deleted, result.duration_ms,
+            );
+            update_heartbeat_scan_done(&conn, result.duration_ms)?;
+            last_full_scan = Instant::now();
+        }
+        Err(e) => {
+            tracing::error!("startup scan failed: {e}");
+            update_heartbeat_state(&conn, "watching")?;
+        }
+    }
+
+    let prev_paths = scanner::load_prev_paths(&conn)?;
+    let old_body_hashes = scanner::load_old_body_hashes(&conn)?;
 
     let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     conn.execute(
@@ -74,34 +103,119 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
     )?;
     let watcher_scan_id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
 
-    let prev_paths = scanner::load_prev_paths(&conn)?;
-    let old_body_hashes = scanner::load_old_body_hashes(&conn)?;
+    tracing::info!("watching, {} roots, {} known paths, scan_id={}", roots.len(), prev_paths.len(), watcher_scan_id);
 
-    tracing::info!("ready, {} roots, {} known paths, scan_id={}", roots.len(), prev_paths.len(), watcher_scan_id);
+    event_loop(
+        &mut conn, config, &scan_config, &rx, &roots, &global_rules,
+        prev_paths, old_body_hashes, watcher_scan_id, shutdown, last_full_scan,
+    )?;
 
-    event_loop(&mut conn, config, &rx, &roots, &global_rules, prev_paths, old_body_hashes, watcher_scan_id, shutdown)?;
-
+    update_heartbeat_state(&conn, "stopped")?;
     tracing::info!("watcher shutting down");
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Crash recovery + heartbeat
+// ---------------------------------------------------------------------------
+
+fn recover_crashed_scans(conn: &Connection) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let count = conn.execute(
+        "UPDATE scan_runs SET status = 'failed', finished_at = ?1, error = 'watcher restarted' WHERE status = 'running'",
+        params![now_str],
+    )?;
+    if count > 0 {
+        tracing::info!("crash recovery: marked {} stale scan_runs as failed", count);
+    }
+    Ok(())
+}
+
+fn upsert_heartbeat(conn: &Connection, state: &str, watch_count: i64) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let pid = std::process::id() as i64;
+    conn.execute(
+        "INSERT INTO watcher_heartbeat (id, pid, started_at, updated_at, state, watch_count)
+         VALUES (1, ?1, ?2, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET pid = ?1, started_at = ?2, updated_at = ?2, state = ?3, watch_count = ?4",
+        params![pid, now_str, state, watch_count],
+    )?;
+    Ok(())
+}
+
+fn update_heartbeat_state(conn: &Connection, state: &str) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    conn.execute(
+        "UPDATE watcher_heartbeat SET state = ?1, updated_at = ?2 WHERE id = 1",
+        params![state, now_str],
+    )?;
+    Ok(())
+}
+
+fn update_heartbeat_scan_done(conn: &Connection, duration_ms: u64) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    conn.execute(
+        "UPDATE watcher_heartbeat SET state = 'watching', updated_at = ?1, last_full_scan_at = ?1, last_full_scan_duration_ms = ?2 WHERE id = 1",
+        params![now_str, duration_ms as i64],
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Event loop
+// ---------------------------------------------------------------------------
+
 fn event_loop(
     conn: &mut Connection,
     config: &Config,
+    scan_config: &Config,
     rx: &std::sync::mpsc::Receiver<notify::Event>,
     roots: &[PathBuf],
     global_rules: &SectionRules,
     mut prev_paths: HashMap<PathBuf, PrevPathEntry>,
-    old_body_hashes: HashMap<String, String>,
-    scan_id: i64,
+    mut old_body_hashes: HashMap<String, String>,
+    mut scan_id: i64,
     shutdown: &AtomicBool,
+    mut last_full_scan: Instant,
 ) -> Result<()> {
     let mut debounce = DebounceBuffer::with_defaults();
     let fts_max = config.fts_content_max_bytes as usize;
+    let scan_interval = Duration::from_secs(config.full_scan_interval_sec);
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
+        }
+
+        // Periodic safety-net scan
+        if last_full_scan.elapsed() >= scan_interval {
+            tracing::info!("periodic full scan triggered");
+            update_heartbeat_state(conn, "scanning")?;
+
+            match scanner::scan(conn, scan_config, global_rules) {
+                Ok(result) => {
+                    tracing::info!(
+                        "periodic scan: {} created, {} updated, {} deleted in {}ms",
+                        result.tier1.created, result.tier1.updated, result.tier1.deleted, result.duration_ms,
+                    );
+                    update_heartbeat_scan_done(conn, result.duration_ms)?;
+                }
+                Err(e) => {
+                    tracing::error!("periodic scan failed: {e}");
+                    update_heartbeat_state(conn, "watching")?;
+                }
+            }
+
+            prev_paths = scanner::load_prev_paths(conn)?;
+            old_body_hashes = scanner::load_old_body_hashes(conn)?;
+            last_full_scan = Instant::now();
+
+            let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            conn.execute(
+                "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
+                params![now_str],
+            )?;
+            scan_id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
         }
 
         let timeout = debounce
@@ -151,6 +265,10 @@ fn event_loop(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Event mapping
+// ---------------------------------------------------------------------------
+
 fn map_notify_event(kind: &EventKind, cookie: u32) -> Option<FsEventKind> {
     match kind {
         EventKind::Modify(notify::event::ModifyKind::Name(mode)) => match mode {
@@ -168,6 +286,10 @@ fn map_notify_event(kind: &EventKind, cookie: u32) -> Option<FsEventKind> {
         _ => None,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Per-event processing
+// ---------------------------------------------------------------------------
 
 fn find_root_for_path<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
     roots.iter().find(|r| path.starts_with(r))

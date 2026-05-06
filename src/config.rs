@@ -13,6 +13,7 @@ pub struct Config {
     pub max_metadata_bytes: u64,
     pub audit_retention_days: u64,
     pub scan_batch_size: usize,
+    pub full_scan_interval_sec: u64,
 }
 
 impl Config {
@@ -45,6 +46,7 @@ impl Config {
         let max_metadata_bytes = parse_env_or("SMRITI_MAX_METADATA_BYTES", 524288000u64)?;
         let audit_retention_days = parse_env_or("SMRITI_AUDIT_RETENTION_DAYS", 30u64)?;
         let scan_batch_size = parse_env_or("SMRITI_SCAN_BATCH_SIZE", 2000usize)?;
+        let full_scan_interval_sec = parse_env_or("SMRITI_WATCH_FULL_SCAN_INTERVAL", 86400u64)?;
 
         Ok(Self {
             db_path,
@@ -56,6 +58,7 @@ impl Config {
             max_metadata_bytes,
             audit_retention_days,
             scan_batch_size,
+            full_scan_interval_sec,
         })
     }
 }

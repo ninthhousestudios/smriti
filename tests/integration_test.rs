@@ -23,6 +23,7 @@ fn test_config(tmp: &TempDir) -> Config {
         max_metadata_bytes: 524288000,
         audit_retention_days: 30,
         scan_batch_size: 500,
+        full_scan_interval_sec: 86400,
     }
 }
 
