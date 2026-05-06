@@ -113,6 +113,12 @@ enum Commands {
         /// Root to audit (e.g., /mnt/usb-backup)
         root: PathBuf,
     },
+    /// Install systemd user service for smriti-watch
+    InstallServices {
+        /// Enable and start the service after installing
+        #[arg(long)]
+        enable: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -162,6 +168,7 @@ fn main() -> Result<()> {
         Commands::Watch => smriti::watcher::run_watch(&config)?,
         Commands::Triage => cmd_triage(&config)?,
         Commands::BackupAudit { root } => cmd_backup_audit(&config, &root)?,
+        Commands::InstallServices { enable } => cmd_install_services(enable)?,
     }
 
     Ok(())
@@ -710,6 +717,56 @@ fn format_bytes(bytes: i64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+fn cmd_install_services(enable: bool) -> Result<()> {
+    let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME not set"))?;
+    let smriti_bin = format!("{home}/.cargo/bin/smriti");
+
+    let unit_content = format!(
+        r#"[Unit]
+Description=smriti-watch filesystem watcher
+After=default.target
+
+[Service]
+Type=simple
+ExecStart={smriti_bin} watch
+Restart=always
+RestartSec=2
+TimeoutStopSec=30
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+"#
+    );
+
+    let service_dir = format!("{home}/.config/systemd/user");
+    std::fs::create_dir_all(&service_dir)?;
+
+    let service_path = format!("{service_dir}/smriti-watch.service");
+    std::fs::write(&service_path, unit_content)?;
+    println!("Wrote {service_path}");
+
+    let status = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("systemctl --user daemon-reload failed");
+    }
+    println!("Reloaded systemd user daemon");
+
+    if enable {
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", "smriti-watch.service"])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("systemctl --user enable --now smriti-watch.service failed");
+        }
+        println!("Enabled and started smriti-watch.service");
+    }
+
+    Ok(())
 }
 
 fn parse_duration_string(s: &str) -> Result<std::time::Duration> {
