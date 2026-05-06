@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -78,7 +77,7 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
     let prev_paths = scanner::load_prev_paths(&conn)?;
     let old_body_hashes = scanner::load_old_body_hashes(&conn)?;
 
-    eprintln!("[watcher] ready, {} roots, {} known paths, scan_id={}", roots.len(), prev_paths.len(), watcher_scan_id);
+    tracing::info!("ready, {} roots, {} known paths, scan_id={}", roots.len(), prev_paths.len(), watcher_scan_id);
 
     event_loop(&mut conn, config, &rx, &roots, &global_rules, prev_paths, old_body_hashes, watcher_scan_id, shutdown)?;
 
@@ -116,7 +115,7 @@ fn event_loop(
                 let now = Instant::now();
                 for path in &event.paths {
                     if let Some(kind) = map_notify_event(&event.kind) {
-                        eprintln!("[watcher] debounce insert: {:?} {:?}", kind, path);
+                        tracing::debug!("debounce insert: {:?} {:?}", kind, path);
                         debounce.insert(path.clone(), kind, now);
                     }
                 }
@@ -128,17 +127,17 @@ fn event_loop(
         let now = Instant::now();
         let flushed = debounce.flush(now);
         if !flushed.is_empty() {
-            eprintln!("[watcher] flushing {} events", flushed.len());
+            tracing::debug!("flushing {} events", flushed.len());
             let tx = conn.transaction().map_err(SmritiError::Db)?;
             for fe in &flushed {
                 if let Err(e) = process_flushed(
                     &tx, config, fe, roots, global_rules, &prev_paths, &old_body_hashes, fts_max, scan_id,
                 ) {
-                    eprintln!("[watcher] ERROR processing {}: {e}", fe.path.display());
+                    tracing::error!("processing {}: {e}", fe.path.display());
                 }
             }
             if let Err(e) = tx.commit() {
-                eprintln!("[watcher] ERROR committing: {e}");
+                tracing::error!("commit failed: {e}");
                 return Err(SmritiError::Db(e));
             }
 
