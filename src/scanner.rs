@@ -159,6 +159,40 @@ pub struct ScanRunStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Scan setup
+// ---------------------------------------------------------------------------
+
+pub fn prepare_scan(
+    config: &Config,
+    root_override: Option<Vec<PathBuf>>,
+    jobs: Option<usize>,
+) -> Result<(Connection, Config, SectionRules)> {
+    if let Some(j) = jobs {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(j)
+            .build_global()
+            .ok();
+    }
+
+    let mut scan_config = config.clone();
+    if let Some(paths) = root_override {
+        scan_config.roots = paths;
+    }
+
+    let effective_roots = crate::roots::load_roots(&scan_config)?;
+    if effective_roots.is_empty() {
+        return Err(crate::error::SmritiError::NoRoots);
+    }
+    scan_config.roots = effective_roots;
+
+    let conn = db::open(&config.db_path)?;
+    db::checkpoint_wal(&conn)?;
+    let rules = crate::ignore::load_user_smritiignore();
+
+    Ok((conn, scan_config, rules))
+}
+
+// ---------------------------------------------------------------------------
 // Per-path core
 // ---------------------------------------------------------------------------
 

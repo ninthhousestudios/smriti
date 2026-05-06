@@ -227,6 +227,19 @@ fn classify_against(
     None
 }
 
+pub fn load_user_smritiignore() -> SectionRules {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let path = Path::new(&home).join(".smritiignore");
+    if path.is_file() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(rules) = parse_smritiignore(&content, Path::new(&home)) {
+                return rules;
+            }
+        }
+    }
+    SectionRules::empty()
+}
+
 /// Match a path against a `Gitignore` matcher.
 ///
 /// Uses `Gitignore::matched` which handles prefix-stripping internally and

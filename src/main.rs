@@ -1,11 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use smriti::config::Config;
-use smriti::ignore::SectionRules;
 use smriti::roots;
 use smriti::search;
 
@@ -174,45 +173,10 @@ fn cmd_init(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn load_user_smritiignore() -> SectionRules {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let path = Path::new(&home).join(".smritiignore");
-    if path.is_file() {
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                match smriti::ignore::parse_smritiignore(&content, Path::new(&home)) {
-                    Ok(rules) => return rules,
-                    Err(e) => eprintln!("Warning: failed to parse ~/.smritiignore: {e}"),
-                }
-            }
-            Err(e) => eprintln!("Warning: failed to read ~/.smritiignore: {e}"),
-        }
-    }
-    SectionRules::empty()
-}
 
 fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<usize>) -> Result<()> {
-    if let Some(j) = jobs {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(j)
-            .build_global()
-            .ok();
-    }
-
-    let mut scan_config = config.clone();
-    if let Some(paths) = filter_paths {
-        scan_config.roots = paths;
-    }
-
-    let effective_roots = roots::load_roots(&scan_config)?;
-    if effective_roots.is_empty() {
-        anyhow::bail!("No roots configured. Run `smriti roots add <path>` or set SMRITI_ROOTS.");
-    }
-    scan_config.roots = effective_roots;
-
-    let mut conn = smriti::db::open(&config.db_path)?;
-    smriti::db::checkpoint_wal(&conn)?;
-    let global_rules = load_user_smritiignore();
+    let (mut conn, scan_config, global_rules) =
+        smriti::scanner::prepare_scan(config, filter_paths, jobs)?;
     let result = smriti::scanner::scan(&mut conn, &scan_config, &global_rules)?;
 
     println!("Scan complete in {}ms", result.duration_ms);
@@ -560,7 +524,7 @@ fn cmd_scan_status(config: &Config) -> Result<()> {
 
 fn cmd_triage(config: &Config) -> Result<()> {
     let conn = smriti::db::open_readonly(&config.db_path)?;
-    let global_rules = load_user_smritiignore();
+    let global_rules = smriti::ignore::load_user_smritiignore();
     let report = smriti::triage::analyze(&conn, &global_rules)?;
 
     if report.recommendations.is_empty() && report.duplicates.is_empty() {

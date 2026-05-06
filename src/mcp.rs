@@ -10,7 +10,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::ignore::SectionRules;
 use crate::privacy::PrivacyGate;
 use crate::search;
 
@@ -115,29 +114,14 @@ impl SmritiServer {
 
     #[tool(description = "Trigger a scan cycle over allowlisted roots. Returns summary of changes.")]
     async fn smriti_scan(&self, Parameters(p): Parameters<ScanParams>) -> String {
-        // Open a fresh writer connection just for this scan; the persistent
-        // self.db is read-only so it can't conflict with a concurrent
-        // `smriti scan` CLI invocation on the same wal-index SHM.
-        let mut conn = match crate::db::open(&self.config.db_path) {
-            Ok(c) => c,
-            Err(e) => return format!("Error opening writer connection: {e}"),
-        };
-        let mut scan_config = (*self.config).clone();
-
-        if let Some(paths) = p.paths {
-            scan_config.roots = paths.iter().map(std::path::PathBuf::from).collect();
-        }
-
-        let effective_roots = match crate::roots::load_roots(&scan_config) {
-            Ok(r) => r,
-            Err(e) => return format!("Error loading roots: {e}"),
-        };
-        if effective_roots.is_empty() {
-            return "No roots configured. Run `smriti roots add <path>` or set SMRITI_ROOTS.".to_string();
-        }
-        scan_config.roots = effective_roots;
-
-        let global_rules = SectionRules::empty();
+        let root_override = p.paths.map(|paths| {
+            paths.iter().map(std::path::PathBuf::from).collect()
+        });
+        let (mut conn, scan_config, global_rules) =
+            match crate::scanner::prepare_scan(&self.config, root_override, None) {
+                Ok(t) => t,
+                Err(e) => return format!("Scan setup error: {e}"),
+            };
         match crate::scanner::scan(&mut conn, &scan_config, &global_rules) {
             Ok(result) => serde_json::to_string(&serde_json::json!({
                 "tier1": {
