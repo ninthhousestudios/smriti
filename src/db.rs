@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{Connection, ffi::sqlite3_auto_extension};
@@ -128,7 +129,40 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         })?;
     }
 
+    // 0003: watcher tables — all CREATE TABLE/INDEX IF NOT EXISTS, inherently idempotent.
+    let sql = include_str!("../migrations/0003_watcher_tables.sql");
+    conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
+        message: format!("0003_watcher_tables: {e}"),
+    })?;
+
     Ok(())
+}
+
+pub fn acquire_writer_lock(db_path: &Path) -> Result<File> {
+    use std::os::unix::io::AsRawFd;
+
+    let lock_path = writer_lock_path(db_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let file = File::create(&lock_path)?;
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        return Err(SmritiError::Other(format!(
+            "Another smriti writer holds the lock ({}). Only one writer process is allowed.",
+            lock_path.display()
+        )));
+    }
+    Ok(file)
+}
+
+fn writer_lock_path(db_path: &Path) -> PathBuf {
+    db_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("writer.lock")
 }
 
 pub fn prune_events(conn: &Connection, older_than: Duration) -> Result<u64> {
@@ -206,5 +240,39 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM read_audit", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_watcher_tables_created() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('scan_requests','watcher_heartbeat') ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(tables, vec!["scan_requests", "watcher_heartbeat"]);
+    }
+
+    #[test]
+    fn test_writer_lock_exclusive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("index.db");
+
+        let _lock1 = acquire_writer_lock(&db_path).expect("first lock should succeed");
+        let result = acquire_writer_lock(&db_path);
+        assert!(result.is_err(), "second lock should fail");
+    }
+
+    #[test]
+    fn test_writer_lock_released_on_drop() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("index.db");
+
+        {
+            let _lock = acquire_writer_lock(&db_path).expect("first lock should succeed");
+        }
+        let _lock2 = acquire_writer_lock(&db_path).expect("lock should succeed after drop");
     }
 }
