@@ -3,8 +3,11 @@
 //! Walks allowlisted roots, classifies paths via [`IgnoreStack`], applies an
 //! mtime+size short-circuit, diffs against the previous state in `paths`, emits
 //! lifecycle events, and records a snapshot row.
+//!
+//! The per-path core ([`process_path`]) is the shared indexing primitive used by
+//! both the batch scanner and the watcher's debounce flusher.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -37,7 +40,7 @@ pub enum EventType {
 }
 
 impl EventType {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Created => "created",
             Self::Moved => "moved",
@@ -86,39 +89,22 @@ pub struct ScanResult {
     pub duration_ms: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Internal working types
-// ---------------------------------------------------------------------------
-
 /// What we know about a path from the previous scan (from the `paths` table).
-#[derive(Debug)]
-struct PrevPathEntry {
-    content_hash: String,
-    mtime: i64,
-    size_bytes: i64,
+#[derive(Debug, Clone)]
+pub struct PrevPathEntry {
+    pub content_hash: String,
+    pub mtime: i64,
+    pub size_bytes: i64,
 }
 
-/// What we computed for a path in the current scan.
-struct DocInfo {
-    title: Option<String>,
-    summary: Option<String>,
-    topics_json: String,
-    structure_json: String,
-    is_binary: bool,
-    fts_content: Option<String>,
-}
-
-#[derive(Debug)]
-struct CurrentEntry {
-    path: PathBuf,
-    root: PathBuf,
-    content_hash: String,
-    body_hash: String,
-    mtime: i64,
-    size_bytes: i64,
-    short_circuited: bool,
-    embed_excluded: bool,
-    doc_info: Option<DocInfo>,
+/// Extracted metadata for a document.
+pub struct DocInfo {
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub topics_json: String,
+    pub structure_json: String,
+    pub is_binary: bool,
+    pub fts_content: Option<String>,
 }
 
 impl std::fmt::Debug for DocInfo {
@@ -127,39 +113,39 @@ impl std::fmt::Debug for DocInfo {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public scan entry point
-// ---------------------------------------------------------------------------
-
-pub fn scan(
-    conn: &mut Connection,
-    config: &Config,
-    global_rules: &SectionRules,
-) -> Result<ScanResult> {
-    scan_batched(conn, config, global_rules)
+#[derive(Debug)]
+pub struct CurrentEntry {
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub content_hash: String,
+    pub body_hash: String,
+    pub mtime: i64,
+    pub size_bytes: i64,
+    pub short_circuited: bool,
+    pub embed_excluded: bool,
+    pub doc_info: Option<DocInfo>,
 }
 
-/// Query the status of a running (or most recent) scan.
-pub fn scan_status(conn: &Connection) -> Result<Option<ScanRunStatus>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, started_at, finished_at, status, files_seen, error
-         FROM scan_runs ORDER BY id DESC LIMIT 1",
-    )?;
-    let result = stmt.query_row([], |row| {
-        Ok(ScanRunStatus {
-            id: row.get(0)?,
-            started_at: row.get(1)?,
-            finished_at: row.get(2)?,
-            status: row.get(3)?,
-            files_seen: row.get(4)?,
-            error: row.get(5)?,
-        })
-    });
-    match result {
-        Ok(s) => Ok(Some(s)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+pub struct WalkEntry {
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub mtime: i64,
+    pub size_bytes: i64,
+    pub inode: u64,
+    pub is_large: bool,
+    pub embed_excluded: bool,
+    pub needs_hash: bool,
+    pub prev_hash: Option<String>,
+}
+
+pub struct PathOutcome {
+    pub event: Option<Event>,
+}
+
+pub struct WalkResult {
+    pub entries: Vec<WalkEntry>,
+    pub seen_paths: HashSet<PathBuf>,
+    pub catalog_dirs: HashMap<PathBuf, (u64, u64)>,
 }
 
 #[derive(Debug)]
@@ -173,26 +159,303 @@ pub struct ScanRunStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Intermediate type for the walk phase (before hashing)
+// Per-path core
 // ---------------------------------------------------------------------------
 
-struct WalkEntry {
-    path: PathBuf,
-    root: PathBuf,
-    mtime: i64,
-    size_bytes: i64,
-    inode: u64,
-    is_large: bool,
-    embed_excluded: bool,
-    needs_hash: bool,
-    prev_hash: Option<String>,
+/// Process a single path: upsert document + path rows, determine event.
+///
+/// Idempotent: calling twice with the same inputs produces the same DB state.
+/// The caller manages transaction boundaries.
+pub fn process_path(
+    conn: &Connection,
+    entry: &CurrentEntry,
+    prev: Option<&PrevPathEntry>,
+    old_body_hash: Option<&str>,
+    scan_id: i64,
+    now_str: &str,
+) -> Result<PathOutcome> {
+    let now_dt = Utc::now();
+    let now_dt_str = now_dt.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    if let Some(ref info) = entry.doc_info {
+        let body_hash_opt = if entry.body_hash.is_empty() || entry.body_hash == entry.content_hash {
+            None::<&str>
+        } else {
+            Some(entry.body_hash.as_str())
+        };
+
+        let new_rowid: Option<i64> = conn.prepare_cached(
+            "INSERT OR IGNORE INTO documents
+                (content_hash, body_hash, title, summary, topics, structure, is_binary, embed_excluded, byte_size, first_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             RETURNING rowid",
+        )?.query_row(
+            params![
+                entry.content_hash,
+                body_hash_opt,
+                info.title,
+                info.summary,
+                info.topics_json,
+                info.structure_json,
+                info.is_binary,
+                entry.embed_excluded,
+                entry.size_bytes,
+                now_str,
+            ],
+            |row| row.get(0),
+        ).optional()?;
+
+        if let Some(rowid) = new_rowid {
+            if !info.is_binary {
+                conn.prepare_cached(
+                    "INSERT INTO document_fts (rowid, title, topics, summary, content)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?.execute(params![
+                    rowid,
+                    info.title.as_deref().unwrap_or(""),
+                    info.topics_json,
+                    info.summary.as_deref().unwrap_or(""),
+                    info.fts_content.as_deref().unwrap_or(""),
+                ])?;
+            }
+        } else if !entry.body_hash.is_empty() && entry.body_hash != entry.content_hash {
+            conn.prepare_cached(
+                "UPDATE documents SET body_hash = ?1 WHERE content_hash = ?2 AND body_hash IS NULL",
+            )?.execute(params![entry.body_hash, entry.content_hash])?;
+        }
+    }
+
+    let path_str = entry.path.to_string_lossy();
+    if entry.short_circuited {
+        conn.prepare_cached(
+            "UPDATE paths SET last_seen_scan = ?1 WHERE path = ?2 AND disappeared IS NULL",
+        )?.execute(params![scan_id, path_str.as_ref()])?;
+    } else {
+        conn.prepare_cached(
+            "UPDATE paths SET disappeared = ?1 WHERE path = ?2 AND disappeared IS NULL",
+        )?.execute(params![now_str, path_str.as_ref()])?;
+        conn.prepare_cached(
+            "INSERT INTO paths (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?.execute(params![
+            entry.content_hash,
+            path_str.as_ref(),
+            entry.root.to_string_lossy().as_ref(),
+            false,
+            entry.mtime,
+            entry.size_bytes,
+            now_str,
+            scan_id,
+        ])?;
+    }
+
+    let event_type = determine_event_type_provisional(
+        &entry.content_hash,
+        &entry.body_hash,
+        prev,
+        old_body_hash,
+    );
+
+    let event = if let Some(et) = event_type {
+        let ext = metadata::file_extension(&entry.path);
+        let mime = metadata::detect_mime_type(&entry.path);
+        conn.prepare_cached(
+            "INSERT INTO events (event_type, content_hash, path, timestamp, file_extension, mime_type, scan_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?.execute(params![
+            et.as_str(),
+            entry.content_hash,
+            path_str.as_ref(),
+            now_dt_str,
+            ext,
+            mime,
+            scan_id,
+        ])?;
+        Some(Event {
+            event_type: et,
+            content_hash: entry.content_hash.clone(),
+            path: path_str.to_string(),
+            timestamp: now_dt,
+            file_extension: ext,
+            mime_type: mime,
+        })
+    } else {
+        None
+    };
+
+    Ok(PathOutcome { event })
+}
+
+fn determine_event_type_provisional(
+    content_hash: &str,
+    body_hash: &str,
+    prev: Option<&PrevPathEntry>,
+    old_body_hash: Option<&str>,
+) -> Option<EventType> {
+    if let Some(prev) = prev {
+        if prev.content_hash == content_hash {
+            return None;
+        }
+        let old_body = old_body_hash.unwrap_or("");
+        if !old_body.is_empty()
+            && !body_hash.is_empty()
+            && old_body != prev.content_hash.as_str()
+            && hasher::detect_minor_change(&prev.content_hash, content_hash, old_body, body_hash)
+        {
+            Some(EventType::MinorChange)
+        } else {
+            Some(EventType::Updated)
+        }
+    } else {
+        Some(EventType::Created)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Batched scan with parallel hashing
+// Walk phase
 // ---------------------------------------------------------------------------
 
-fn scan_batched(
+pub fn walk_roots(
+    config: &Config,
+    global_rules: &SectionRules,
+    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
+) -> Result<WalkResult> {
+    let mut entries: Vec<WalkEntry> = Vec::new();
+    let mut seen_paths: HashSet<PathBuf> = HashSet::new();
+    let mut catalog_dirs: HashMap<PathBuf, (u64, u64)> = HashMap::new();
+    let mut skip_subtrees: Vec<PathBuf> = Vec::new();
+
+    for root in &config.roots {
+        if !root.exists() {
+            tracing::warn!("root does not exist, skipping: {}", root.display());
+            continue;
+        }
+
+        let global_layer = hardened_defaults(root);
+        let mut ignore_stack = IgnoreStack::new(global_layer);
+        let mut dir_depth_stack: Vec<usize> = Vec::new();
+
+        let walker = WalkDir::new(root)
+            .follow_links(false)
+            .sort_by_file_name();
+
+        for entry_result in walker {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("walkdir error: {}", e);
+                    continue;
+                }
+            };
+
+            let path = entry.path();
+            let is_dir = entry.file_type().is_dir();
+            let depth = entry.depth();
+
+            if skip_subtrees.iter().any(|s| path.starts_with(s) && path != s) {
+                continue;
+            }
+            skip_subtrees.retain(|s| path.starts_with(s) || !s.starts_with(path.parent().unwrap_or(path)));
+
+            while dir_depth_stack.last().copied().unwrap_or(0) >= depth && !dir_depth_stack.is_empty() {
+                dir_depth_stack.pop();
+                ignore_stack.pop();
+            }
+
+            if is_dir {
+                let pushed = ignore_stack.push_dir(path)?;
+                if pushed {
+                    dir_depth_stack.push(depth);
+                }
+            }
+
+            let classification_global = classify_section_rules(global_rules, path, is_dir);
+            let classification_stack = ignore_stack.classify(path, is_dir);
+            let classification = most_restrictive(classification_global, classification_stack);
+
+            match classification {
+                PathClassification::Ignored => {
+                    if is_dir {
+                        skip_subtrees.push(path.to_path_buf());
+                    }
+                    continue;
+                }
+
+                PathClassification::Cataloged if is_dir => {
+                    let (total_bytes, file_count) = catalog_subtree(path);
+                    catalog_dirs.insert(path.to_path_buf(), (total_bytes, file_count));
+                    skip_subtrees.push(path.to_path_buf());
+                    continue;
+                }
+
+                PathClassification::Cataloged => {
+                    continue;
+                }
+
+                classification @ (PathClassification::Indexed | PathClassification::IndexedNoEmbed) => {
+                    let embed_excluded = matches!(classification, PathClassification::IndexedNoEmbed);
+
+                    if is_dir {
+                        continue;
+                    }
+
+                    if entry.path_is_symlink() {
+                        continue;
+                    }
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+
+                    let fs_meta = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::warn!("cannot stat {}: {}", path.display(), e);
+                            continue;
+                        }
+                    };
+
+                    let mtime = fs_meta.mtime();
+                    let size_bytes = fs_meta.size() as i64;
+                    let inode = fs_meta.ino();
+                    let is_large = fs_meta.len() > config.max_metadata_bytes;
+
+                    seen_paths.insert(path.to_path_buf());
+
+                    let (needs_hash, prev_hash) =
+                        if let Some(prev) = prev_paths.get(path) {
+                            if prev.mtime == mtime && prev.size_bytes == size_bytes {
+                                (false, Some(prev.content_hash.clone()))
+                            } else {
+                                (true, None)
+                            }
+                        } else {
+                            (true, None)
+                        };
+
+                    entries.push(WalkEntry {
+                        path: path.to_path_buf(),
+                        root: root.clone(),
+                        mtime,
+                        size_bytes,
+                        inode,
+                        is_large,
+                        embed_excluded,
+                        needs_hash,
+                        prev_hash,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(WalkResult { entries, seen_paths, catalog_dirs })
+}
+
+// ---------------------------------------------------------------------------
+// Public scan entry point
+// ---------------------------------------------------------------------------
+
+pub fn scan(
     conn: &mut Connection,
     config: &Config,
     global_rules: &SectionRules,
@@ -204,9 +467,7 @@ fn scan_batched(
 
     db::enable_scan_pragmas(conn)?;
 
-    // ------------------------------------------------------------------
     // 1. Register this scan run
-    // ------------------------------------------------------------------
     conn.execute(
         "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
         params![now_str],
@@ -218,30 +479,8 @@ fn scan_batched(
     )?;
     tracing::info!("scan {scan_id} started, batch_size={batch_size}");
 
-    // ------------------------------------------------------------------
     // 2. Load previous state
-    // ------------------------------------------------------------------
-    let prev_paths: HashMap<PathBuf, PrevPathEntry> = {
-        let mut stmt = conn.prepare(
-            "SELECT path, content_hash, mtime, size_bytes FROM paths WHERE disappeared IS NULL",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                PathBuf::from(row.get::<_, String>(0)?),
-                PrevPathEntry {
-                    content_hash: row.get(1)?,
-                    mtime: row.get(2)?,
-                    size_bytes: row.get(3)?,
-                },
-            ))
-        })?;
-        let mut map = HashMap::new();
-        for row in rows {
-            let (path, entry) = row?;
-            map.insert(path, entry);
-        }
-        map
-    };
+    let prev_paths = load_prev_paths(conn)?;
 
     let mut prev_hash_to_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for (path, entry) in &prev_paths {
@@ -251,165 +490,25 @@ fn scan_batched(
             .push(path.clone());
     }
 
-    let old_body_hashes: HashMap<String, String> = {
-        let mut stmt = conn.prepare("SELECT content_hash, body_hash FROM documents WHERE body_hash IS NOT NULL")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut map = HashMap::new();
-        for row in rows {
-            let (hash, body_hash) = row?;
-            map.insert(hash, body_hash);
+    let old_body_hashes = load_old_body_hashes(conn)?;
+
+    // 3. Walk phase
+    let walk_data = match walk_roots(config, global_rules, &prev_paths) {
+        Ok(wd) => wd,
+        Err(e) => {
+            let _ = conn.execute(
+                "UPDATE scan_runs SET finished_at = ?1, status = 'failed', error = ?2 WHERE id = ?3",
+                params![
+                    Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    e.to_string(),
+                    scan_id,
+                ],
+            );
+            let _ = db::restore_default_pragmas(conn);
+            return Err(e);
         }
-        map
     };
-
-    // ------------------------------------------------------------------
-    // 3. Walk phase: collect entries + catalog dirs (single-threaded)
-    // ------------------------------------------------------------------
-    let mut walk_entries: Vec<WalkEntry> = Vec::new();
-    let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut catalog_dirs: HashMap<PathBuf, (u64, u64)> = HashMap::new();
-    let mut skip_subtrees: Vec<PathBuf> = Vec::new();
-
-    let walk_result: std::result::Result<(), crate::error::SmritiError> = (|| {
-        for root in &config.roots {
-            if !root.exists() {
-                tracing::warn!("root does not exist, skipping: {}", root.display());
-                continue;
-            }
-
-            let global_layer = hardened_defaults(root);
-            let mut ignore_stack = IgnoreStack::new(global_layer);
-            let mut dir_depth_stack: Vec<usize> = Vec::new();
-
-            let walker = WalkDir::new(root)
-                .follow_links(false)
-                .sort_by_file_name();
-
-            for entry_result in walker {
-                let entry = match entry_result {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("walkdir error: {}", e);
-                        continue;
-                    }
-                };
-
-                let path = entry.path();
-                let is_dir = entry.file_type().is_dir();
-                let depth = entry.depth();
-
-                if skip_subtrees.iter().any(|s| path.starts_with(s) && path != s) {
-                    continue;
-                }
-                skip_subtrees.retain(|s| path.starts_with(s) || !s.starts_with(path.parent().unwrap_or(path)));
-
-                while dir_depth_stack.last().copied().unwrap_or(0) >= depth && !dir_depth_stack.is_empty() {
-                    dir_depth_stack.pop();
-                    ignore_stack.pop();
-                }
-
-                if is_dir {
-                    let pushed = ignore_stack.push_dir(path)?;
-                    if pushed {
-                        dir_depth_stack.push(depth);
-                    }
-                }
-
-                let classification_global = classify_section_rules(global_rules, path, is_dir);
-                let classification_stack = ignore_stack.classify(path, is_dir);
-                let classification = most_restrictive(classification_global, classification_stack);
-
-                match classification {
-                    PathClassification::Ignored => {
-                        if is_dir {
-                            skip_subtrees.push(path.to_path_buf());
-                        }
-                        continue;
-                    }
-
-                    PathClassification::Cataloged if is_dir => {
-                        let (total_bytes, file_count) = catalog_subtree(path);
-                        catalog_dirs.insert(path.to_path_buf(), (total_bytes, file_count));
-                        skip_subtrees.push(path.to_path_buf());
-                        continue;
-                    }
-
-                    PathClassification::Cataloged => {
-                        continue;
-                    }
-
-                    classification @ (PathClassification::Indexed | PathClassification::IndexedNoEmbed) => {
-                        let embed_excluded = matches!(classification, PathClassification::IndexedNoEmbed);
-
-                        if is_dir {
-                            continue;
-                        }
-
-                        if entry.path_is_symlink() {
-                            continue;
-                        }
-                        if !entry.file_type().is_file() {
-                            continue;
-                        }
-
-                        let fs_meta = match entry.metadata() {
-                            Ok(m) => m,
-                            Err(e) => {
-                                tracing::warn!("cannot stat {}: {}", path.display(), e);
-                                continue;
-                            }
-                        };
-
-                        let mtime = fs_meta.mtime();
-                        let size_bytes = fs_meta.size() as i64;
-                        let inode = fs_meta.ino();
-                        let is_large = fs_meta.len() > config.max_metadata_bytes;
-
-                        seen_paths.insert(path.to_path_buf());
-
-                        let (needs_hash, prev_hash) =
-                            if let Some(prev) = prev_paths.get(path) {
-                                if prev.mtime == mtime && prev.size_bytes == size_bytes {
-                                    (false, Some(prev.content_hash.clone()))
-                                } else {
-                                    (true, None)
-                                }
-                            } else {
-                                (true, None)
-                            };
-
-                        walk_entries.push(WalkEntry {
-                            path: path.to_path_buf(),
-                            root: root.clone(),
-                            mtime,
-                            size_bytes,
-                            inode,
-                            is_large,
-                            embed_excluded,
-                            needs_hash,
-                            prev_hash,
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
-    })();
-
-    if let Err(e) = walk_result {
-        let _ = conn.execute(
-            "UPDATE scan_runs SET finished_at = ?1, status = 'failed', error = ?2 WHERE id = ?3",
-            params![
-                Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                e.to_string(),
-                scan_id,
-            ],
-        );
-        let _ = db::restore_default_pragmas(conn);
-        return Err(e);
-    }
+    let WalkResult { entries: walk_entries, seen_paths, catalog_dirs } = walk_data;
 
     let walk_elapsed = start.elapsed();
     let needs_hash_count = walk_entries.iter().filter(|e| e.needs_hash).count();
@@ -420,10 +519,7 @@ fn scan_batched(
         walk_elapsed.as_secs_f64(),
     );
 
-    // ------------------------------------------------------------------
     // 4. Hash + metadata phase: parallel via rayon
-    //    Reads each file once for hashing AND metadata extraction.
-    // ------------------------------------------------------------------
     let fts_max = config.fts_content_max_bytes as usize;
     let hash_results: Vec<Option<(usize, String, String, Option<DocInfo>)>> = walk_entries
         .par_iter()
@@ -433,7 +529,6 @@ fn scan_batched(
                 return None;
             }
             if entry.is_large {
-                // Stream-hash large files without reading fully into memory.
                 Some(match hasher::hash_file(&entry.path) {
                     Ok(content_hash) => {
                         let doc_info = DocInfo {
@@ -452,7 +547,6 @@ fn scan_batched(
                     }
                 })
             } else {
-                // Read once: hash + metadata + FTS in one pass.
                 Some(match std::fs::read(&entry.path) {
                     Ok(content) => {
                         let content_hash = hasher::hash_content(&content);
@@ -495,7 +589,6 @@ fn scan_batched(
         })
         .collect();
 
-    // Merge hash results into CurrentEntry list.
     let mut hash_map: HashMap<usize, (String, String, Option<DocInfo>)> = HashMap::new();
     for result in hash_results.into_iter().flatten() {
         let (idx, content_hash, body_hash, doc_info) = result;
@@ -519,7 +612,7 @@ fn scan_batched(
         let (content_hash, body_hash, short_circuited, doc_info) = if we.needs_hash {
             match hash_map.remove(&idx) {
                 Some((ch, bh, di)) => (ch, bh, false, di),
-                None => continue, // hash failed, skip
+                None => continue,
             }
         } else {
             (we.prev_hash.unwrap(), String::new(), true, None)
@@ -548,9 +641,7 @@ fn scan_batched(
         });
     }
 
-    // ------------------------------------------------------------------
-    // 5. DB commit phase: flush in batches
-    // ------------------------------------------------------------------
+    // 5. DB commit phase: flush in batches via process_path
     let mut total_files_seen: u64 = 0;
     let mut total_batches: u64 = 0;
     let mut all_events: Vec<Event> = Vec::new();
@@ -558,7 +649,7 @@ fn scan_batched(
     for chunk in current_entries.chunks(batch_size) {
         match flush_batch(
             conn, chunk, &prev_paths, &old_body_hashes,
-            scan_id, &now_str, config,
+            scan_id, &now_str,
         ) {
             Ok(batch_events) => {
                 all_events.extend(batch_events);
@@ -593,20 +684,115 @@ fn scan_batched(
         "scan {scan_id} batches complete: {total_files_seen} files in {total_batches} batches, beginning finalize"
     );
 
-    // ------------------------------------------------------------------
-    // 6. Finalize transaction
-    // ------------------------------------------------------------------
+    // 6. Finalize
+    let finalize_ctx = FinalizeContext {
+        scan_id,
+        now,
+        now_str: &now_str,
+        prev_hash_to_paths: &prev_hash_to_paths,
+        seen_paths: &seen_paths,
+        current_path_to_inode: &current_path_to_inode,
+        current_inode_to_paths: &current_inode_to_paths,
+        catalog_dirs: &catalog_dirs,
+        total_files_seen,
+        start,
+    };
+    let (tier1, tier2, duration_ms) = finalize_scan(conn, &mut all_events, &finalize_ctx)?;
+
+    db::restore_default_pragmas(conn)?;
+    crate::db::prune_audit_log(conn, config.audit_retention_days)?;
+
+    Ok(ScanResult {
+        tier1,
+        tier2,
+        events: all_events,
+        duration_ms,
+    })
+}
+
+/// Query the status of a running (or most recent) scan.
+pub fn scan_status(conn: &Connection) -> Result<Option<ScanRunStatus>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, started_at, finished_at, status, files_seen, error
+         FROM scan_runs ORDER BY id DESC LIMIT 1",
+    )?;
+    let result = stmt.query_row([], |row| {
+        Ok(ScanRunStatus {
+            id: row.get(0)?,
+            started_at: row.get(1)?,
+            finished_at: row.get(2)?,
+            status: row.get(3)?,
+            files_seen: row.get(4)?,
+            error: row.get(5)?,
+        })
+    });
+    match result {
+        Ok(s) => Ok(Some(s)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private: batch flush (calls process_path in a transaction)
+// ---------------------------------------------------------------------------
+
+fn flush_batch(
+    conn: &mut Connection,
+    batch: &[CurrentEntry],
+    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
+    old_body_hashes: &HashMap<String, String>,
+    scan_id: i64,
+    now_str: &str,
+) -> Result<Vec<Event>> {
+    let tx = conn.transaction()?;
+    let mut batch_events = Vec::new();
+
+    for entry in batch {
+        let prev = prev_paths.get(&entry.path);
+        let old_body = prev
+            .and_then(|p| old_body_hashes.get(&p.content_hash))
+            .map(|s| s.as_str());
+        let outcome = process_path(&tx, entry, prev, old_body, scan_id, now_str)?;
+        if let Some(ev) = outcome.event {
+            batch_events.push(ev);
+        }
+    }
+
+    tx.commit()?;
+    Ok(batch_events)
+}
+
+// ---------------------------------------------------------------------------
+// Private: scan finalize phase
+// ---------------------------------------------------------------------------
+
+struct FinalizeContext<'a> {
+    scan_id: i64,
+    now: chrono::DateTime<Utc>,
+    now_str: &'a str,
+    prev_hash_to_paths: &'a HashMap<String, Vec<PathBuf>>,
+    seen_paths: &'a HashSet<PathBuf>,
+    current_path_to_inode: &'a HashMap<PathBuf, u64>,
+    current_inode_to_paths: &'a HashMap<u64, Vec<PathBuf>>,
+    catalog_dirs: &'a HashMap<PathBuf, (u64, u64)>,
+    total_files_seen: u64,
+    start: Instant,
+}
+
+fn finalize_scan(
+    conn: &mut Connection,
+    all_events: &mut Vec<Event>,
+    ctx: &FinalizeContext,
+) -> Result<(Tier1Summary, Tier2Summary, u64)> {
     let tx = conn.transaction()?;
 
-    // 6a. Disappear pass: paths not seen this scan generation.
     let disappeared_count = tx.execute(
         "UPDATE paths SET disappeared = ?1
          WHERE disappeared IS NULL AND last_seen_scan < ?2",
-        params![now_str, scan_id],
+        params![ctx.now_str, ctx.scan_id],
     )?;
 
-    // 6b. Emit Deleted events for genuinely-gone paths (not just mtime-updated ones
-    //     that flush_batch disappeared-and-reinserted).
     {
         let mut stmt = tx.prepare(
             "SELECT path, content_hash FROM paths
@@ -616,7 +802,7 @@ fn scan_batched(
                  WHERE p2.path = paths.path AND p2.disappeared IS NULL
              )",
         )?;
-        let rows = stmt.query_map(params![now_str, scan_id], |row| {
+        let rows = stmt.query_map(params![ctx.now_str, ctx.scan_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         for row in rows {
@@ -627,40 +813,39 @@ fn scan_batched(
             tx.execute(
                 "INSERT INTO events (event_type, content_hash, path, timestamp, file_extension, mime_type, scan_id)
                  VALUES ('deleted', ?1, ?2, ?3, ?4, ?5, ?6)",
-                params![content_hash, path_str, now_str, ext, mime, scan_id],
+                params![content_hash, path_str, ctx.now_str, ext, mime, ctx.scan_id],
             )?;
             all_events.push(Event {
                 event_type: EventType::Deleted,
                 content_hash,
                 path: path_str,
-                timestamp: now,
+                timestamp: ctx.now,
                 file_extension: ext,
                 mime_type: mime,
             });
         }
     }
 
-    // 6c. Upgrade provisional Created events to Moved/Copied/Hardlinked.
     {
         let mut stmt = tx.prepare(
             "SELECT id, content_hash, path FROM events
              WHERE scan_id = ?1 AND event_type = 'created'",
         )?;
-        let provisional: Vec<(i64, String, String)> = stmt.query_map(params![scan_id], |row| {
+        let provisional: Vec<(i64, String, String)> = stmt.query_map(params![ctx.scan_id], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?.filter_map(|r| r.ok()).collect();
 
         for (event_id, hash, path_str) in &provisional {
-            if let Some(prev_path_list) = prev_hash_to_paths.get(hash.as_str()) {
-                let gone_path = prev_path_list.iter().find(|p| !seen_paths.contains(*p));
+            if let Some(prev_path_list) = ctx.prev_hash_to_paths.get(hash.as_str()) {
+                let gone_path = prev_path_list.iter().find(|p| !ctx.seen_paths.contains(*p));
 
                 let upgrade = if gone_path.is_some() {
                     Some("moved")
                 } else {
                     let entry_path = PathBuf::from(path_str);
-                    let shared_inode = current_path_to_inode
+                    let shared_inode = ctx.current_path_to_inode
                         .get(&entry_path)
-                        .and_then(|ino| current_inode_to_paths.get(ino))
+                        .and_then(|ino| ctx.current_inode_to_paths.get(ino))
                         .map(|paths| paths.len() > 1)
                         .unwrap_or(false);
 
@@ -692,9 +877,8 @@ fn scan_batched(
         }
     }
 
-    // 6d. Recount events for tier1 summary.
     let mut tier1 = Tier1Summary::default();
-    for ev in &all_events {
+    for ev in all_events.iter() {
         match ev.event_type {
             EventType::Created => tier1.created += 1,
             EventType::Moved => tier1.moved += 1,
@@ -707,9 +891,8 @@ fn scan_batched(
         tier1.total += 1;
     }
 
-    // 6e. Upsert catalog entries.
-    let tier2_cataloged = catalog_dirs.len() as u32;
-    for (dir_path, (total_bytes, file_count)) in &catalog_dirs {
+    let tier2_cataloged = ctx.catalog_dirs.len() as u32;
+    for (dir_path, (total_bytes, file_count)) in ctx.catalog_dirs {
         let path_str = dir_path.to_string_lossy();
         let existing: Option<(i64, i64)> = tx.query_row(
             "SELECT total_bytes, file_count FROM catalog WHERE path = ?1",
@@ -727,7 +910,7 @@ fn scan_batched(
                     prev_count,
                     *total_bytes as i64,
                     *file_count as i64,
-                    now_str,
+                    ctx.now_str,
                     path_str.as_ref(),
                 ],
             )?;
@@ -739,19 +922,18 @@ fn scan_batched(
                     path_str.as_ref(),
                     *total_bytes as i64,
                     *file_count as i64,
-                    now_str,
+                    ctx.now_str,
                 ],
             )?;
         }
     }
 
-    // 6f. Record snapshot.
-    let duration_ms = start.elapsed().as_millis() as u64;
+    let duration_ms = ctx.start.elapsed().as_millis() as u64;
     tx.execute(
         "INSERT INTO snapshots (timestamp, tier1_files_scanned, tier2_dirs_cataloged, events_emitted, duration_ms)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
-            now_str,
+            ctx.now_str,
             tier1.total as i64,
             tier2_cataloged as i64,
             all_events.len() as i64,
@@ -759,220 +941,77 @@ fn scan_batched(
         ],
     )?;
 
-    // 6g. Mark scan complete.
     tx.execute(
         "UPDATE scan_runs SET finished_at = ?1, status = 'complete', files_seen = ?2 WHERE id = ?3",
         params![
             Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            total_files_seen as i64,
-            scan_id,
+            ctx.total_files_seen as i64,
+            ctx.scan_id,
         ],
     )?;
 
     tx.commit()?;
 
     tracing::info!(
-        "scan {scan_id} complete: {total_files_seen} files, {} events, {duration_ms}ms ({disappeared_count} disappeared)",
+        "scan {} complete: {} files, {} events, {duration_ms}ms ({disappeared_count} disappeared)",
+        ctx.scan_id,
+        ctx.total_files_seen,
         all_events.len(),
     );
-
-    db::restore_default_pragmas(conn)?;
-    crate::db::prune_audit_log(conn, config.audit_retention_days)?;
 
     let tier2 = Tier2Summary {
         cataloged: tier2_cataloged,
         total: tier2_cataloged,
     };
 
-    Ok(ScanResult {
-        tier1,
-        tier2,
-        events: all_events,
-        duration_ms,
-    })
+    Ok((tier1, tier2, duration_ms))
 }
 
-fn flush_batch(
-    conn: &mut Connection,
-    batch: &[CurrentEntry],
-    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
-    old_body_hashes: &HashMap<String, String>,
-    scan_id: i64,
-    now_str: &str,
-    _config: &Config,
-) -> Result<Vec<Event>> {
-    let tx = conn.transaction()?;
-    let now_dt = Utc::now();
-    let now_dt_str = now_dt.format("%Y-%m-%d %H:%M:%S").to_string();
-    let mut batch_events = Vec::new();
+// ---------------------------------------------------------------------------
+// DB state loaders (used by scan, available for watcher)
+// ---------------------------------------------------------------------------
 
-    // RETURNING rowid: gives the documents row's rowid on insert, and zero
-    // rows on conflict (INSERT OR IGNORE). We use the rowid to link the FTS
-    // row back to the document — contentless FTS5 returns NULL for column
-    // SELECTs, so the JOIN must go through rowid.
-    let mut stmt_insert_doc = tx.prepare_cached(
-        "INSERT OR IGNORE INTO documents
-            (content_hash, body_hash, title, summary, topics, structure, is_binary, embed_excluded, byte_size, first_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         RETURNING rowid",
+pub fn load_prev_paths(conn: &Connection) -> Result<HashMap<PathBuf, PrevPathEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, content_hash, mtime, size_bytes FROM paths WHERE disappeared IS NULL",
     )?;
-    let mut stmt_update_body = tx.prepare_cached(
-        "UPDATE documents SET body_hash = ?1 WHERE content_hash = ?2 AND body_hash IS NULL",
-    )?;
-    let mut stmt_update_seen = tx.prepare_cached(
-        "UPDATE paths SET last_seen_scan = ?1 WHERE path = ?2 AND disappeared IS NULL",
-    )?;
-    let mut stmt_disappear = tx.prepare_cached(
-        "UPDATE paths SET disappeared = ?1 WHERE path = ?2 AND disappeared IS NULL",
-    )?;
-    let mut stmt_insert_path = tx.prepare_cached(
-        "INSERT INTO paths (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-    )?;
-    let mut stmt_insert_event = tx.prepare_cached(
-        "INSERT INTO events (event_type, content_hash, path, timestamp, file_extension, mime_type, scan_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-    )?;
-    // Contentless FTS5: INSERT only — DELETE/UPDATE would require the
-    // original tokens we no longer keep. Orphans accumulate harmlessly and
-    // are filtered at query time via JOIN against documents.
-    // rowid is the documents.rowid returned from the doc INSERT.
-    let mut stmt_fts_insert = tx.prepare_cached(
-        "INSERT INTO document_fts (rowid, title, topics, summary, content)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
-
-    for entry in batch {
-        if let Some(ref info) = entry.doc_info {
-            let body_hash_opt = if entry.body_hash.is_empty() || entry.body_hash == entry.content_hash {
-                None::<&str>
-            } else {
-                Some(entry.body_hash.as_str())
-            };
-
-            // INSERT OR IGNORE ... RETURNING rowid: yields the new rowid on
-            // insert, no rows on conflict. Lets us gate the FTS insert and
-            // skip a separate SELECT COUNT(*) precheck per file.
-            let new_rowid: Option<i64> = stmt_insert_doc.query_row(
-                params![
-                    entry.content_hash,
-                    body_hash_opt,
-                    info.title,
-                    info.summary,
-                    info.topics_json,
-                    info.structure_json,
-                    info.is_binary,
-                    entry.embed_excluded,
-                    entry.size_bytes,
-                    now_str,
-                ],
-                |row| row.get(0),
-            ).optional()?;
-
-            if let Some(rowid) = new_rowid {
-                if !info.is_binary {
-                    stmt_fts_insert.execute(params![
-                        rowid,
-                        info.title.as_deref().unwrap_or(""),
-                        info.topics_json,
-                        info.summary.as_deref().unwrap_or(""),
-                        info.fts_content.as_deref().unwrap_or(""),
-                    ])?;
-                }
-            } else if !entry.body_hash.is_empty() && entry.body_hash != entry.content_hash {
-                stmt_update_body.execute(params![entry.body_hash, entry.content_hash])?;
-            }
-        }
-
-        let path_str = entry.path.to_string_lossy();
-        if entry.short_circuited {
-            stmt_update_seen.execute(params![scan_id, path_str.as_ref()])?;
-        } else {
-            stmt_disappear.execute(params![now_str, path_str.as_ref()])?;
-            stmt_insert_path.execute(params![
-                entry.content_hash,
-                path_str.as_ref(),
-                entry.root.to_string_lossy().as_ref(),
-                false,
-                entry.mtime,
-                entry.size_bytes,
-                now_str,
-                scan_id,
-            ])?;
-        }
-
-        let event_type = determine_event_type_provisional(entry, prev_paths, old_body_hashes);
-        if let Some(et) = event_type {
-            let ext = metadata::file_extension(&entry.path);
-            let mime = metadata::detect_mime_type(&entry.path);
-            stmt_insert_event.execute(params![
-                et.as_str(),
-                entry.content_hash,
-                path_str.as_ref(),
-                now_dt_str,
-                ext,
-                mime,
-                scan_id,
-            ])?;
-            batch_events.push(Event {
-                event_type: et,
-                content_hash: entry.content_hash.clone(),
-                path: path_str.to_string(),
-                timestamp: now_dt,
-                file_extension: ext,
-                mime_type: mime,
-            });
-        }
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            PathBuf::from(row.get::<_, String>(0)?),
+            PrevPathEntry {
+                content_hash: row.get(1)?,
+                mtime: row.get(2)?,
+                size_bytes: row.get(3)?,
+            },
+        ))
+    })?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (path, entry) = row?;
+        map.insert(path, entry);
     }
-
-    drop(stmt_insert_doc);
-    drop(stmt_update_body);
-    drop(stmt_update_seen);
-    drop(stmt_disappear);
-    drop(stmt_insert_path);
-    drop(stmt_insert_event);
-    drop(stmt_fts_insert);
-
-    tx.commit()?;
-    Ok(batch_events)
+    Ok(map)
 }
 
-/// Provisional event determination for batched scan.
-/// Move/copy/hardlink detection is deferred to finalize since we don't yet
-/// know the full set of seen_paths.
-fn determine_event_type_provisional(
-    entry: &CurrentEntry,
-    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
-    old_body_hashes: &HashMap<String, String>,
-) -> Option<EventType> {
-    let path = &entry.path;
-    let new_hash = &entry.content_hash;
-
-    if let Some(prev) = prev_paths.get(path) {
-        if prev.content_hash == *new_hash {
-            return None;
-        }
-        let old_body = old_body_hashes.get(&prev.content_hash).map(|s| s.as_str()).unwrap_or("");
-        let new_body = &entry.body_hash;
-        if !old_body.is_empty()
-            && !new_body.is_empty()
-            && old_body != prev.content_hash.as_str()
-            && hasher::detect_minor_change(&prev.content_hash, new_hash, old_body, new_body)
-        {
-            Some(EventType::MinorChange)
-        } else {
-            Some(EventType::Updated)
-        }
-    } else {
-        Some(EventType::Created)
+pub fn load_old_body_hashes(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT content_hash, body_hash FROM documents WHERE body_hash IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (hash, body_hash) = row?;
+        map.insert(hash, body_hash);
     }
+    Ok(map)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Walk a subtree counting total bytes and file count (for catalog entries).
 fn catalog_subtree(dir: &Path) -> (u64, u64) {
     let mut total_bytes: u64 = 0;
     let mut file_count: u64 = 0;
@@ -987,9 +1026,7 @@ fn catalog_subtree(dir: &Path) -> (u64, u64) {
     (total_bytes, file_count)
 }
 
-/// Determine the most restrictive of two classifications.
 fn most_restrictive(a: PathClassification, b: PathClassification) -> PathClassification {
-    // Priority: Ignored > Cataloged > IndexedNoEmbed > Indexed
     let rank = |c: &PathClassification| match c {
         PathClassification::Ignored => 3,
         PathClassification::Cataloged => 2,
@@ -999,9 +1036,6 @@ fn most_restrictive(a: PathClassification, b: PathClassification) -> PathClassif
     if rank(&a) >= rank(&b) { a } else { b }
 }
 
-
-/// Classify a path against a bare `SectionRules` (without a full IgnoreStack).
-/// Used to apply the caller-supplied `global_rules` as a pre-filter.
 fn classify_section_rules(rules: &SectionRules, path: &Path, is_dir: bool) -> PathClassification {
     if matches!(rules.ignored.matched(path, is_dir), ignore::Match::Ignore(_)) {
         return PathClassification::Ignored;
@@ -1015,11 +1049,7 @@ fn classify_section_rules(rules: &SectionRules, path: &Path, is_dir: bool) -> Pa
     PathClassification::Indexed
 }
 
-/// Truncate `s` to at most `max` bytes, walking back to the nearest UTF-8
-/// char boundary. Avoids `s[..max]` panics when `max` lands inside a
-/// multi-byte char (the bug at scanner.rs:491 that crashed scans on
-/// auto-generated unicode-table files).
-fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
+pub fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
     }
@@ -1042,32 +1072,23 @@ mod tests {
 
     #[test]
     fn truncate_at_char_boundary_walks_back_inside_multibyte() {
-        // 'ᥴ' (U+1964 LIMBU VOWEL SIGN II) is 3 bytes: e1 a5 a4.
-        // The actual file that crashed: byte 102400 was inside this char.
-        let mut s = String::from("a"); // 1 ascii byte
-        s.push('ᥴ'); // 3 bytes -> total 4
-        // Asking for max=2 lands in the middle of the multi-byte char.
-        // Without the fix: s[..2] panics. With the fix: walks back to byte 1.
+        let mut s = String::from("a");
+        s.push('ᥴ');
         assert_eq!(truncate_to_char_boundary(&s, 2), "a");
-        // max=1 is a clean ascii boundary.
         assert_eq!(truncate_to_char_boundary(&s, 1), "a");
-        // max=4 is exactly the end.
         assert_eq!(truncate_to_char_boundary(&s, 4), s.as_str());
     }
 
     #[test]
     fn truncate_at_char_boundary_regression_byte_102400() {
-        // Reproduces the exact crash: a long ASCII prefix followed by a
-        // multi-byte char straddling byte 102400.
         let mut s = String::with_capacity(102_500);
         for _ in 0..102_399 {
             s.push('a');
         }
-        s.push('ᥴ'); // 3 bytes at positions 102399..102402
+        s.push('ᥴ');
         for _ in 0..50 {
             s.push('z');
         }
-        // 102400 falls inside the multibyte char. Pre-fix this panicked.
         let truncated = truncate_to_char_boundary(&s, 102_400);
         assert!(truncated.is_char_boundary(truncated.len()));
         assert_eq!(truncated.len(), 102_399);
