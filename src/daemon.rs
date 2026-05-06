@@ -17,11 +17,13 @@ pub async fn run_stdio(config: Config) -> anyhow::Result<()> {
     drop(crate::db::open(&config.db_path)?);
     let conn = crate::db::open_readonly(&config.db_path)?;
     let db = Arc::new(Mutex::new(conn));
+    let write_conn = crate::db::open(&config.db_path)?;
+    let write_db = Arc::new(Mutex::new(write_conn));
     let audit_dir = config.db_path.parent().unwrap_or(std::path::Path::new("."));
     let audit_conn = crate::db::open_audit(audit_dir)?;
     let audit_db = Arc::new(Mutex::new(audit_conn));
     let cfg = Arc::new(config);
-    let server = SmritiServer::new(db, audit_db, cfg);
+    let server = SmritiServer::new(db, write_db, audit_db, cfg);
 
     let transport = rmcp::transport::stdio();
     let service = server.serve(transport).await?;
@@ -41,6 +43,8 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
     drop(crate::db::open(&config.db_path)?);
     let conn = crate::db::open_readonly(&config.db_path)?;
     let db = Arc::new(Mutex::new(conn));
+    let write_conn = crate::db::open(&config.db_path)?;
+    let write_db = Arc::new(Mutex::new(write_conn));
     let audit_dir = config.db_path.parent().unwrap_or(std::path::Path::new("."));
     let audit_conn = crate::db::open_audit(audit_dir)?;
     let audit_db = Arc::new(Mutex::new(audit_conn));
@@ -54,10 +58,11 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
     let session_manager = Arc::new(LocalSessionManager::default());
 
     let db_clone = Arc::clone(&db);
+    let write_clone = Arc::clone(&write_db);
     let audit_clone = Arc::clone(&audit_db);
     let cfg_clone = Arc::clone(&cfg);
     let mcp_service = StreamableHttpService::new(
-        move || Ok(SmritiServer::new(Arc::clone(&db_clone), Arc::clone(&audit_clone), Arc::clone(&cfg_clone))),
+        move || Ok(SmritiServer::new(Arc::clone(&db_clone), Arc::clone(&write_clone), Arc::clone(&audit_clone), Arc::clone(&cfg_clone))),
         session_manager,
         http_config,
     );

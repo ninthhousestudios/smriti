@@ -206,6 +206,96 @@ pub fn enqueue_scan(conn: &Connection, kind: &str, root: Option<&str>) -> Result
     Ok(id)
 }
 
+#[derive(Debug)]
+pub struct ScanRequest {
+    pub id: i64,
+    pub kind: String,
+    pub root: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ScanRequestStatus {
+    pub status: String,
+    pub scan_run_id: Option<i64>,
+    pub error: Option<String>,
+    pub files_seen: Option<i64>,
+    pub duration_ms: Option<i64>,
+}
+
+pub fn claim_pending_scan(conn: &Connection) -> Result<Option<ScanRequest>> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let updated = conn.execute(
+        "UPDATE scan_requests SET status = 'running', started_at = ?1
+         WHERE id = (SELECT id FROM scan_requests WHERE status = 'pending' ORDER BY requested_at LIMIT 1)",
+        rusqlite::params![now_str],
+    )?;
+    if updated == 0 {
+        return Ok(None);
+    }
+    let row = conn.query_row(
+        "SELECT id, kind, root FROM scan_requests WHERE status = 'running' ORDER BY started_at DESC LIMIT 1",
+        [],
+        |r| Ok(ScanRequest { id: r.get(0)?, kind: r.get(1)?, root: r.get(2)? }),
+    )?;
+    Ok(Some(row))
+}
+
+pub fn complete_scan_request(conn: &Connection, id: i64, scan_run_id: Option<i64>) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    conn.execute(
+        "UPDATE scan_requests SET status = 'complete', completed_at = ?1, scan_run_id = ?2 WHERE id = ?3",
+        rusqlite::params![now_str, scan_run_id, id],
+    )?;
+    Ok(())
+}
+
+pub fn fail_scan_request(conn: &Connection, id: i64, error: &str) -> Result<()> {
+    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    conn.execute(
+        "UPDATE scan_requests SET status = 'failed', completed_at = ?1, error = ?2 WHERE id = ?3",
+        rusqlite::params![now_str, error, id],
+    )?;
+    Ok(())
+}
+
+pub fn poll_scan_request(conn: &Connection, id: i64) -> Result<Option<ScanRequestStatus>> {
+    let row = conn.query_row(
+        "SELECT sr.status, sr.scan_run_id, sr.error,
+                s.files_seen,
+                CAST((julianday(s.finished_at) - julianday(s.started_at)) * 86400000 AS INTEGER) as duration_ms
+         FROM scan_requests sr
+         LEFT JOIN scan_runs s ON sr.scan_run_id = s.id
+         WHERE sr.id = ?1",
+        rusqlite::params![id],
+        |r| Ok(ScanRequestStatus {
+            status: r.get(0)?,
+            scan_run_id: r.get(1)?,
+            error: r.get(2)?,
+            files_seen: r.get(3)?,
+            duration_ms: r.get(4)?,
+        }),
+    );
+    match row {
+        Ok(s) => Ok(Some(s)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(SmritiError::Db(e)),
+    }
+}
+
+pub fn watcher_holds_lock(db_path: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let lock_path = writer_lock_path(db_path);
+    let Ok(file) = File::open(&lock_path) else { return false };
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        true
+    } else {
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+        false
+    }
+}
+
 pub fn prune_events(conn: &Connection, older_than: Duration) -> Result<u64> {
     let threshold_secs = older_than.as_secs() as i64;
     let deleted = conn.execute(
@@ -316,5 +406,64 @@ mod tests {
             let _lock = acquire_writer_lock(&db_path).expect("first lock should succeed");
         }
         let _lock2 = acquire_writer_lock(&db_path).expect("lock should succeed after drop");
+    }
+
+    #[test]
+    fn test_scan_request_lifecycle() {
+        let conn = open(Path::new(":memory:")).unwrap();
+
+        let id = enqueue_scan(&conn, "full", None).unwrap();
+        assert!(id > 0);
+
+        let status = poll_scan_request(&conn, id).unwrap().unwrap();
+        assert_eq!(status.status, "pending");
+
+        let req = claim_pending_scan(&conn).unwrap().unwrap();
+        assert_eq!(req.id, id);
+        assert_eq!(req.kind, "full");
+        assert!(req.root.is_none());
+
+        let status = poll_scan_request(&conn, id).unwrap().unwrap();
+        assert_eq!(status.status, "running");
+
+        conn.execute(
+            "INSERT INTO scan_runs (id, started_at, status) VALUES (42, datetime('now'), 'running')",
+            [],
+        ).unwrap();
+        complete_scan_request(&conn, id, Some(42)).unwrap();
+        let status = poll_scan_request(&conn, id).unwrap().unwrap();
+        assert_eq!(status.status, "complete");
+        assert_eq!(status.scan_run_id, Some(42));
+    }
+
+    #[test]
+    fn test_scan_request_fail() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        let id = enqueue_scan(&conn, "path", Some(r#"["/tmp"]"#)).unwrap();
+        let _ = claim_pending_scan(&conn).unwrap().unwrap();
+        fail_scan_request(&conn, id, "boom").unwrap();
+        let status = poll_scan_request(&conn, id).unwrap().unwrap();
+        assert_eq!(status.status, "failed");
+        assert_eq!(status.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn test_claim_returns_none_when_empty() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        assert!(claim_pending_scan(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_watcher_holds_lock_detection() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("index.db");
+
+        assert!(!watcher_holds_lock(&db_path), "no lock file yet");
+
+        let _lock = acquire_writer_lock(&db_path).unwrap();
+        assert!(watcher_holds_lock(&db_path), "lock is held");
+
+        drop(_lock);
+        assert!(!watcher_holds_lock(&db_path), "lock released");
     }
 }

@@ -87,6 +87,7 @@ pub struct ScanResult {
     pub tier2: Tier2Summary,
     pub events: Vec<Event>,
     pub duration_ms: u64,
+    pub scan_run_id: Option<i64>,
 }
 
 /// What we know about a path from the previous scan (from the `paths` table).
@@ -746,6 +747,7 @@ pub fn scan(
         tier2,
         events: all_events,
         duration_ms,
+        scan_run_id: Some(scan_id),
     })
 }
 

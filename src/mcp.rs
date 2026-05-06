@@ -21,6 +21,7 @@ use crate::search;
 #[derive(Clone)]
 pub struct SmritiServer {
     db: Arc<Mutex<Connection>>,
+    write_db: Arc<Mutex<Connection>>,
     audit_db: Arc<Mutex<Connection>>,
     config: Arc<Config>,
     #[allow(dead_code)]
@@ -35,6 +36,8 @@ pub struct SmritiServer {
 pub struct ScanParams {
     /// Subtree paths to scan (omit for all configured roots)
     pub paths: Option<Vec<String>>,
+    /// Timeout in seconds waiting for watcher to complete (default 300)
+    pub timeout_sec: Option<u64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -125,41 +128,89 @@ fn with_freshness(conn: &Connection, json: String) -> String {
 
 #[tool_router]
 impl SmritiServer {
-    pub fn new(db: Arc<Mutex<Connection>>, audit_db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
+    pub fn new(db: Arc<Mutex<Connection>>, write_db: Arc<Mutex<Connection>>, audit_db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
         Self {
             db,
+            write_db,
             audit_db,
             config,
             tool_router: Self::tool_router(),
         }
     }
 
-    #[tool(description = "Trigger a scan cycle over allowlisted roots. Returns summary of changes.")]
+    #[tool(description = "Trigger a scan cycle over allowlisted roots. Enqueues a scan request for the watcher daemon and polls for completion. Fails fast if watcher is not running.")]
     async fn smriti_scan(&self, Parameters(p): Parameters<ScanParams>) -> String {
-        let root_override = p.paths.map(|paths| {
-            paths.iter().map(std::path::PathBuf::from).collect()
-        });
-        let (mut conn, scan_config, global_rules) =
-            match crate::scanner::prepare_scan(&self.config, root_override, None) {
-                Ok(t) => t,
-                Err(e) => return format!("Scan setup error: {e}"),
+        {
+            let conn = self.db.lock().unwrap();
+            let envelope = FreshnessEnvelope::from_watcher(&conn);
+            if envelope.is_stale {
+                let reason = envelope.stale_reason.unwrap_or_else(|| "unknown".into());
+                return serde_json::json!({
+                    "error": "watcher not running",
+                    "detail": reason,
+                }).to_string();
+            }
+        }
+
+        let (kind, root_json) = match &p.paths {
+            Some(paths) => {
+                let json = serde_json::to_string(paths).unwrap();
+                ("path", Some(json))
+            }
+            None => ("full", None),
+        };
+
+        let req_id = {
+            let wconn = self.write_db.lock().unwrap();
+            match crate::db::enqueue_scan(&wconn, kind, root_json.as_deref()) {
+                Ok(id) => id,
+                Err(e) => return format!("Failed to enqueue scan: {e}"),
+            }
+        };
+
+        let timeout = std::time::Duration::from_secs(p.timeout_sec.unwrap_or(300));
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_millis(250);
+
+        loop {
+            tokio::time::sleep(poll_interval).await;
+
+            if start.elapsed() > timeout {
+                return serde_json::json!({
+                    "error": "scan request timed out",
+                    "request_id": req_id,
+                    "elapsed_sec": start.elapsed().as_secs(),
+                }).to_string();
+            }
+
+            let status = {
+                let conn = self.db.lock().unwrap();
+                match crate::db::poll_scan_request(&conn, req_id) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => continue,
+                    Err(e) => return format!("Poll error: {e}"),
+                }
             };
-        match crate::scanner::scan(&mut conn, &scan_config, &global_rules) {
-            Ok(result) => serde_json::to_string(&serde_json::json!({
-                "tier1": {
-                    "created": result.tier1.created,
-                    "moved": result.tier1.moved,
-                    "updated": result.tier1.updated,
-                    "deleted": result.tier1.deleted,
-                    "total": result.tier1.total,
-                },
-                "tier2": {
-                    "cataloged": result.tier2.cataloged,
-                    "total": result.tier2.total,
-                },
-                "scan_duration_ms": result.duration_ms,
-            })).unwrap_or_else(|e| format!("Serialization error: {e}")),
-            Err(e) => format!("Scan error: {e}"),
+
+            match status.status.as_str() {
+                "complete" => {
+                    return serde_json::json!({
+                        "status": "complete",
+                        "request_id": req_id,
+                        "scan_run_id": status.scan_run_id,
+                        "files_seen": status.files_seen,
+                        "duration_ms": status.duration_ms,
+                    }).to_string();
+                }
+                "failed" => {
+                    return serde_json::json!({
+                        "status": "failed",
+                        "request_id": req_id,
+                        "error": status.error,
+                    }).to_string();
+                }
+                _ => continue,
+            }
         }
     }
 

@@ -470,3 +470,52 @@ fn watcher_heartbeat_reflects_scanning_then_watching() {
     shutdown.store(true, Ordering::SeqCst);
     let _ = handle.join();
 }
+
+#[test]
+fn watcher_drains_scan_request() {
+    let db_dir = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let config = make_config(&db_dir, &root);
+
+    std::fs::write(root.path().join("a.txt"), "alpha").unwrap();
+
+    let _conn = db::open(&config.db_path).unwrap();
+    drop(_conn);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        watcher::run_watch_with_shutdown(&config_clone, &shutdown_clone)
+    });
+
+    // Wait for startup scan + enter watching
+    std::thread::sleep(Duration::from_millis(3000));
+
+    // Enqueue a scan request from the "serve" side
+    let conn = db::open(&config.db_path).unwrap();
+    let req_id = db::enqueue_scan(&conn, "full", None).unwrap();
+
+    // Poll until complete (timeout 10s)
+    let start = std::time::Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("scan request {req_id} did not complete within 10s");
+        }
+        let status = db::poll_scan_request(&conn, req_id).unwrap();
+        if let Some(s) = status {
+            if s.status == "complete" {
+                assert!(s.scan_run_id.is_some(), "should link to a scan_run");
+                break;
+            }
+            if s.status == "failed" {
+                panic!("scan request failed: {:?}", s.error);
+            }
+        }
+    }
+
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = handle.join();
+}

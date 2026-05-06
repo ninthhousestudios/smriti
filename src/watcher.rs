@@ -201,6 +201,8 @@ fn event_loop(
     let scan_interval = Duration::from_secs(config.full_scan_interval_sec);
     let heartbeat_interval = Duration::from_secs(5);
     let mut last_heartbeat = Instant::now();
+    let scan_req_interval = Duration::from_secs(1);
+    let mut last_scan_req_check = Instant::now();
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -213,6 +215,56 @@ fn event_loop(
                 tracing::warn!("heartbeat tick failed: {e}");
             }
             last_heartbeat = Instant::now();
+        }
+
+        // Drain pending scan_requests
+        if last_scan_req_check.elapsed() >= scan_req_interval {
+            last_scan_req_check = Instant::now();
+            while let Ok(Some(req)) = db::claim_pending_scan(conn) {
+                tracing::info!(req_id = req.id, kind = %req.kind, "claimed scan request");
+                update_heartbeat_state(conn, "scanning")?;
+
+                let mut req_config = scan_config.clone();
+                if let Some(ref root_str) = req.root {
+                    if let Ok(paths) = serde_json::from_str::<Vec<PathBuf>>(root_str) {
+                        req_config.roots = paths;
+                    }
+                }
+
+                match scanner::scan(conn, &req_config, global_rules) {
+                    Ok(result) => {
+                        tracing::info!(
+                            req_id = req.id, "scan request complete: {} created, {} updated, {} deleted in {}ms",
+                            result.tier1.created, result.tier1.updated, result.tier1.deleted, result.duration_ms,
+                        );
+                        let scan_run_id = result.scan_run_id;
+                        if let Err(e) = db::complete_scan_request(conn, req.id, scan_run_id) {
+                            tracing::error!(req_id = req.id, "failed to mark complete: {e}");
+                        }
+                        update_heartbeat_scan_done(conn, result.duration_ms)?;
+                    }
+                    Err(e) => {
+                        tracing::error!(req_id = req.id, "scan request failed: {e}");
+                        if let Err(e2) = db::fail_scan_request(conn, req.id, &e.to_string()) {
+                            tracing::error!(req_id = req.id, "failed to mark failed: {e2}");
+                        }
+                        update_heartbeat_state(conn, "watching")?;
+                    }
+                }
+
+                prev_paths = scanner::load_prev_paths(conn)?;
+                old_body_hashes = scanner::load_old_body_hashes(conn)?;
+                if req.kind == "full" {
+                    last_full_scan = Instant::now();
+                }
+
+                let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                conn.execute(
+                    "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
+                    params![now_str],
+                )?;
+                scan_id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+            }
         }
 
         // Periodic safety-net scan

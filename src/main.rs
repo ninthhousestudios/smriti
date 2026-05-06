@@ -178,6 +178,10 @@ fn cmd_init(config: &Config) -> Result<()> {
 
 
 fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<usize>) -> Result<()> {
+    if smriti::db::watcher_holds_lock(&config.db_path) {
+        return cmd_scan_via_watcher(config, filter_paths);
+    }
+
     let (mut conn, scan_config, global_rules) =
         smriti::scanner::prepare_scan(config, filter_paths, jobs)?;
     let result = smriti::scanner::scan(&mut conn, &scan_config, &global_rules)?;
@@ -196,6 +200,52 @@ fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<us
         result.tier2.cataloged,
     );
     Ok(())
+}
+
+fn cmd_scan_via_watcher(config: &Config, filter_paths: Option<Vec<PathBuf>>) -> Result<()> {
+    let conn = smriti::db::open(&config.db_path)?;
+
+    let (kind, root_json) = match &filter_paths {
+        Some(paths) => ("path", Some(serde_json::to_string(paths)?)),
+        None => ("full", None),
+    };
+
+    let req_id = smriti::db::enqueue_scan(&conn, kind, root_json.as_deref())?;
+    eprintln!("Watcher is running — enqueued scan request {req_id}, polling...");
+
+    let timeout = std::time::Duration::from_secs(300);
+    let start = std::time::Instant::now();
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        if start.elapsed() > timeout {
+            anyhow::bail!("scan request {req_id} timed out");
+        }
+
+        let Some(status) = smriti::db::poll_scan_request(&conn, req_id)? else {
+            continue;
+        };
+
+        match status.status.as_str() {
+            "complete" => {
+                if let Some(ms) = status.duration_ms {
+                    println!("Scan complete in {ms}ms (via watcher)");
+                } else {
+                    println!("Scan complete (via watcher)");
+                }
+                if let Some(files) = status.files_seen {
+                    println!("Files seen: {files}");
+                }
+                return Ok(());
+            }
+            "failed" => {
+                let err = status.error.unwrap_or_else(|| "unknown error".into());
+                anyhow::bail!("scan failed: {err}");
+            }
+            _ => continue,
+        }
+    }
 }
 
 fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, full: bool, ext: Option<&str>, tier2: bool) -> Result<()> {
