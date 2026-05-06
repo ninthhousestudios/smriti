@@ -235,7 +235,7 @@ pub fn process_path(
             "UPDATE paths SET disappeared = ?1 WHERE path = ?2 AND disappeared IS NULL",
         )?.execute(params![now_str, path_str.as_ref()])?;
         conn.prepare_cached(
-            "INSERT INTO paths (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
+            "INSERT OR REPLACE INTO paths (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?.execute(params![
             entry.content_hash,
