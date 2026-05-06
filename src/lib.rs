@@ -2,6 +2,7 @@ pub mod backup;
 pub mod config;
 pub mod db;
 pub mod daemon;
+pub mod debounce;
 pub mod embedding;
 pub mod envelope;
 pub mod error;
