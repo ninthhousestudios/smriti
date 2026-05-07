@@ -349,6 +349,93 @@ pub fn prune_events(conn: &Connection, older_than: Duration) -> Result<u64> {
     Ok(deleted as u64)
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct EventRecord {
+    pub id: i64,
+    pub event_type: String,
+    pub path: String,
+    pub content_hash: String,
+    pub previous_hash: Option<String>,
+    pub previous_path: Option<String>,
+    pub timestamp: String,
+    pub file_extension: Option<String>,
+    pub mime_type: Option<String>,
+    pub scan_id: Option<i64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct EventPage {
+    pub cursor_valid: bool,
+    pub events: Vec<EventRecord>,
+    pub next_cursor: i64,
+    pub has_more: bool,
+}
+
+pub fn events_since(conn: &Connection, cursor: i64, limit: u32) -> Result<EventPage> {
+    let limit = limit.min(1000);
+
+    if cursor > 0 {
+        let min_id: Option<i64> = conn.query_row("SELECT MIN(id) FROM events", [], |r| r.get(0))?;
+        match min_id {
+            None => {
+                return Ok(EventPage {
+                    cursor_valid: true,
+                    events: vec![],
+                    next_cursor: cursor,
+                    has_more: false,
+                });
+            }
+            Some(min) if min > cursor + 1 => {
+                return Ok(EventPage {
+                    cursor_valid: false,
+                    events: vec![],
+                    next_cursor: 0,
+                    has_more: false,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let fetch = limit + 1;
+    let mut stmt = conn.prepare(
+        "SELECT id, event_type, path, content_hash, previous_hash, previous_path,
+                timestamp, file_extension, mime_type, scan_id
+         FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+    )?;
+
+    let mut rows: Vec<EventRecord> = stmt
+        .query_map(rusqlite::params![cursor, fetch], |row| {
+            Ok(EventRecord {
+                id: row.get(0)?,
+                event_type: row.get(1)?,
+                path: row.get(2)?,
+                content_hash: row.get(3)?,
+                previous_hash: row.get(4)?,
+                previous_path: row.get(5)?,
+                timestamp: row.get(6)?,
+                file_extension: row.get(7)?,
+                mime_type: row.get(8)?,
+                scan_id: row.get(9)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let has_more = rows.len() > limit as usize;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+
+    let next_cursor = rows.last().map(|e| e.id).unwrap_or(cursor);
+
+    Ok(EventPage {
+        cursor_valid: true,
+        events: rows,
+        next_cursor,
+        has_more,
+    })
+}
+
 pub fn prune_audit_log(conn: &Connection, retention_days: u64) -> Result<u64> {
     let deleted = conn.execute(
         "DELETE FROM read_audit WHERE timestamp < datetime('now', '-' || ? || ' days')",
@@ -531,5 +618,75 @@ mod tests {
         let enqueuer = ScanEnqueuer::open(&db_path).unwrap();
         let id = enqueuer.enqueue_scan("full", None).unwrap();
         assert!(id > 0);
+    }
+
+    #[test]
+    fn test_events_since_empty_table() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        let page = events_since(&conn, 0, 100).unwrap();
+        assert!(page.cursor_valid);
+        assert!(page.events.is_empty());
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn test_events_since_pagination() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO events (event_type, content_hash, path, timestamp)
+                 VALUES ('created', ?1, ?2, datetime('now'))",
+                rusqlite::params![format!("hash{i}"), format!("/tmp/f{i}")],
+            )
+            .unwrap();
+        }
+
+        let page1 = events_since(&conn, 0, 2).unwrap();
+        assert!(page1.cursor_valid);
+        assert_eq!(page1.events.len(), 2);
+        assert!(page1.has_more);
+        assert_eq!(page1.events[0].path, "/tmp/f0");
+        assert_eq!(page1.events[1].path, "/tmp/f1");
+
+        let page2 = events_since(&conn, page1.next_cursor, 2).unwrap();
+        assert_eq!(page2.events.len(), 2);
+        assert!(page2.has_more);
+
+        let page3 = events_since(&conn, page2.next_cursor, 2).unwrap();
+        assert_eq!(page3.events.len(), 1);
+        assert!(!page3.has_more);
+    }
+
+    #[test]
+    fn test_events_since_cursor_expiry() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO events (event_type, content_hash, path, timestamp)
+                 VALUES ('created', ?1, ?2, datetime('now'))",
+                rusqlite::params![format!("hash{i}"), format!("/tmp/f{i}")],
+            )
+            .unwrap();
+        }
+        // Simulate pruning: delete the first event
+        conn.execute("DELETE FROM events WHERE id = 1", []).unwrap();
+
+        // Cursor 0 is always valid (start of retained window)
+        let page = events_since(&conn, 0, 100).unwrap();
+        assert!(page.cursor_valid);
+        assert_eq!(page.events.len(), 2);
+
+        // Cursor 1 is still valid (min_id=2, cursor+1=2, not behind)
+        let page = events_since(&conn, 1, 100).unwrap();
+        assert!(page.cursor_valid);
+
+        // Simulate more pruning: delete event 2 too
+        conn.execute("DELETE FROM events WHERE id = 2", []).unwrap();
+
+        // Cursor 1 is now expired (min_id=3 > cursor+1=2)
+        let page = events_since(&conn, 1, 100).unwrap();
+        assert!(!page.cursor_valid);
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_cursor, 0);
     }
 }

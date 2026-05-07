@@ -108,6 +108,14 @@ pub struct ManifestParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct HealthParams {}
 
+#[derive(Deserialize, JsonSchema)]
+pub struct EventsSinceParams {
+    /// Event ID to resume from. 0 = from beginning of retained window.
+    pub cursor: i64,
+    /// Max events per page (default 100, max 1000)
+    pub limit: Option<u32>,
+}
+
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
@@ -496,6 +504,20 @@ impl SmritiServer {
             Ok(result) => serde_json::to_string(&result)
                 .unwrap_or_else(|e| format!("Serialization error: {e}")),
             Err(e) => format!("Health error: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Cursor-based event stream. Returns filesystem change events (created, updated, deleted, moved, etc.) after the given cursor. Use cursor=0 for the first call, then pass next_cursor from the response. If cursor_valid is false, events were pruned and consumer should rebuild."
+    )]
+    async fn smriti_events_since(&self, Parameters(p): Parameters<EventsSinceParams>) -> String {
+        let conn = self.db.lock().unwrap();
+        let limit = p.limit.unwrap_or(100);
+        match crate::db::events_since(&conn, p.cursor, limit) {
+            Ok(page) => {
+                serde_json::to_string(&page).unwrap_or_else(|e| format!("Serialization error: {e}"))
+            }
+            Err(e) => format!("Events error: {e}"),
         }
     }
 }

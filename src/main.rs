@@ -106,6 +106,14 @@ enum Commands {
         #[arg(long)]
         stdio: bool,
     },
+    /// Stream events since a cursor (0 = from beginning)
+    EventsSince {
+        /// Event ID to resume from (0 = beginning of retained window)
+        cursor: i64,
+        /// Max events per page (default 100, max 1000)
+        #[arg(long, default_value = "100")]
+        limit: u32,
+    },
     /// Watch filesystem for changes and update index in real time
     Watch,
     /// Analyze index and recommend tier reclassifications
@@ -186,6 +194,7 @@ fn main() -> Result<()> {
                 rt.block_on(smriti::daemon::run_http(config, &host, port))?;
             }
         }
+        Commands::EventsSince { cursor, limit } => cmd_events_since(&config, cursor, limit)?,
         Commands::Watch => smriti::watcher::run_watch(&config)?,
         Commands::Triage => cmd_triage(&config)?,
         Commands::BackupAudit { root } => cmd_backup_audit(&config, &root)?,
@@ -572,6 +581,13 @@ fn cmd_history(
         }
     }
 
+    Ok(())
+}
+
+fn cmd_events_since(config: &Config, cursor: i64, limit: u32) -> Result<()> {
+    let conn = smriti::db::open_readonly(&config.db_path)?;
+    let page = smriti::db::events_since(&conn, cursor, limit)?;
+    println!("{}", serde_json::to_string_pretty(&page)?);
     Ok(())
 }
 
