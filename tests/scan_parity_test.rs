@@ -19,7 +19,6 @@ fn make_config(db_dir: &TempDir, roots: Vec<PathBuf>) -> Config {
     Config {
         db_path: db_dir.path().join("index.db"),
         roots,
-        model_path: None,
         listen_addr: "unix:/tmp/smriti-parity-test.sock".to_string(),
         stale_threshold_sec: 3600,
         fts_content_max_bytes: 102400,

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
-use rusqlite::{ffi::sqlite3_auto_extension, Connection};
+use rusqlite::Connection;
 
 use crate::error::{Result, SmritiError};
 
@@ -20,17 +20,6 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
 }
 
 fn open_connection(path: &Path) -> Result<Connection> {
-    unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *const i8,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite_vec::sqlite3_vec_init as *const ())));
-    }
-
     let conn = if path.as_os_str() == ":memory:" {
         Connection::open_in_memory()?
     } else {
@@ -452,15 +441,6 @@ pub fn db_file_size(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_open_in_memory_and_vec_version() {
-        let conn = open(Path::new(":memory:")).expect("open in-memory db");
-        let version: String = conn
-            .query_row("SELECT vec_version()", [], |row| row.get(0))
-            .expect("vec_version() should return a row");
-        assert!(version.starts_with('v'), "vec_version returned: {version}");
-    }
 
     #[test]
     fn test_prune_events_older_than() {

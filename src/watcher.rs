@@ -913,8 +913,6 @@ fn handle_file(
     let mtime = meta.mtime();
     let size_bytes = meta.len() as i64;
     let is_large = size_bytes > config.max_metadata_bytes as i64;
-    let embed_excluded = classification == PathClassification::IndexedNoEmbed;
-
     let (content_hash, body_hash, doc_info) = if is_large {
         match hasher::hash_file(path) {
             Ok(ch) => {
@@ -957,7 +955,6 @@ fn handle_file(
         mtime,
         size_bytes,
         short_circuited: false,
-        embed_excluded,
         doc_info,
     };
 

@@ -13,7 +13,6 @@ fn make_config(roots: Vec<std::path::PathBuf>) -> (Config, TempDir) {
     let config = Config {
         db_path: db_tmp.path().join("index.db"),
         roots,
-        model_path: None,
         listen_addr: "unix:/tmp/smriti-test-batched.sock".to_string(),
         stale_threshold_sec: 3600,
         fts_content_max_bytes: 102400,

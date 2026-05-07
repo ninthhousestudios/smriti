@@ -3,7 +3,6 @@ pub mod config;
 pub mod daemon;
 pub mod db;
 pub mod debounce;
-pub mod embedding;
 pub mod envelope;
 pub mod error;
 pub mod hasher;

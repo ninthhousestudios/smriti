@@ -80,15 +80,15 @@ fn test_parse_catalog_section() {
     );
 }
 
-/// Patterns under `[no-embed]` classify as IndexedNoEmbed.
+/// `[no-embed]` section is accepted but has no effect (backwards compat).
 #[test]
-fn test_parse_no_embed_section() {
+fn test_parse_no_embed_section_ignored() {
     let tmp = TempDir::new().unwrap();
     let content = "[no-embed]\n**/*.lic\n**/license-keys/\n";
 
     assert_eq!(
         classify_with(tmp.path(), content, "vendor.lic", false),
-        PathClassification::IndexedNoEmbed
+        PathClassification::Indexed
     );
     assert_eq!(
         classify_with(tmp.path(), content, "src/main.rs", false),
@@ -188,7 +188,7 @@ fn test_classify_path_pipeline() {
         ("editor.swp", false, PathClassification::Ignored),
         ("cache.tmp", false, PathClassification::Ignored),
         ("node_modules", true, PathClassification::Cataloged),
-        ("vendor.lic", false, PathClassification::IndexedNoEmbed),
+        ("vendor.lic", false, PathClassification::Indexed),
         ("src/main.rs", false, PathClassification::Indexed),
     ];
 

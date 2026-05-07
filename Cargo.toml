@@ -1,6 +1,6 @@
 [package]
 name = "smriti"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 
 [lib]
@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 # Database
 rusqlite = { version = "0.31", features = ["bundled-full"] }
-sqlite-vec = "0.1"
 
 # Hashing
 blake3 = "1"
@@ -33,11 +32,6 @@ rmcp = { version = "1", features = ["server", "transport-io", "macros", "schemar
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-std", "net", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-
-# Embedding (optional via feature)
-ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic", "ndarray"], optional = true }
-tokenizers = { version = "0.20", optional = true }
-ndarray = { version = "0.16", optional = true }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -73,7 +67,6 @@ tower-http = { version = "0.6", features = ["auth"] }
 
 [features]
 default = []
-embedding = ["ort", "tokenizers", "ndarray"]
 
 [dev-dependencies]
 tempfile = "3"

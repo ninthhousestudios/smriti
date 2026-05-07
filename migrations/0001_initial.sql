@@ -5,16 +5,9 @@ CREATE TABLE IF NOT EXISTS documents (
     summary TEXT,
     structure TEXT,
     topics TEXT,
-    embed_excluded BOOLEAN NOT NULL DEFAULT FALSE,
-    embedding_model TEXT,
     is_binary BOOLEAN NOT NULL DEFAULT FALSE,
     first_seen TIMESTAMP NOT NULL,
     byte_size INTEGER
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(
-    content_hash TEXT PRIMARY KEY,
-    embedding FLOAT[1024]
 );
 
 -- Contentless FTS5: stores only the inverted index, never duplicates source

@@ -393,14 +393,6 @@ fn cmd_audit(
     }
     println!();
 
-    if result.excluded_from_embedding_files > 0 {
-        println!(
-            "Embedding-excluded: {} files ({})",
-            result.excluded_from_embedding_files,
-            format_bytes(result.excluded_from_embedding_bytes),
-        );
-        println!();
-    }
 
     println!(
         "Backup target: {}",
@@ -672,14 +664,6 @@ fn cmd_health(config: &Config) -> Result<()> {
     } else {
         println!("Last scan: never");
     }
-    println!(
-        "Embedder:  {}",
-        if result.embedder_ok {
-            "available"
-        } else {
-            "not configured"
-        }
-    );
     if !result.roots.is_empty() {
         println!("Roots:");
         for r in &result.roots {

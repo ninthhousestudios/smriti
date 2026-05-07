@@ -1,9 +1,10 @@
 //! .smritiignore parser with gitignore semantics.
 //!
-//! A .smritiignore file has three sections:
+//! A .smritiignore file has two sections:
 //! - Default section (before any header): patterns for files to ignore entirely.
 //! - `[catalog]` section: patterns for paths to track as catalog (tier 2) only.
-//! - `[no-embed]` section: patterns for files to index but not embed.
+//!
+//! `[no-embed]` is accepted for backwards compatibility but has no effect.
 //!
 //! Each section uses full gitignore semantics via the `ignore` crate's
 //! `Gitignore` / `GitignoreBuilder`.
@@ -28,21 +29,18 @@ pub enum PathClassification {
     Cataloged,
     /// Tier-1 indexed: hashed, metadata extracted, FTS indexed.
     Indexed,
-    /// Tier-1 indexed but embedding suppressed.
-    IndexedNoEmbed,
 }
 
 /// Compiled rules for one .smritiignore file (or the hardened defaults).
 pub struct SectionRules {
     pub ignored: Gitignore,
     pub cataloged: Gitignore,
-    pub no_embed: Gitignore,
 }
 
 impl SectionRules {
-    /// Returns `true` if all three matchers are empty (match nothing).
+    /// Returns `true` if both matchers are empty (match nothing).
     pub fn is_empty(&self) -> bool {
-        self.ignored.is_empty() && self.cataloged.is_empty() && self.no_embed.is_empty()
+        self.ignored.is_empty() && self.cataloged.is_empty()
     }
 
     /// Build a `SectionRules` with no patterns (matches nothing).
@@ -52,7 +50,6 @@ impl SectionRules {
         Self {
             ignored: g(root),
             cataloged: g(root),
-            no_embed: g(root),
         }
     }
 
@@ -70,7 +67,6 @@ impl SectionRules {
 pub fn parse_smritiignore(content: &str, base_dir: &Path) -> Result<SectionRules> {
     let mut ignored_builder = GitignoreBuilder::new(base_dir);
     let mut cataloged_builder = GitignoreBuilder::new(base_dir);
-    let mut no_embed_builder = GitignoreBuilder::new(base_dir);
 
     enum Section {
         Ignored,
@@ -96,7 +92,7 @@ pub fn parse_smritiignore(content: &str, base_dir: &Path) -> Result<SectionRules
         let builder = match current {
             Section::Ignored => &mut ignored_builder,
             Section::Cataloged => &mut cataloged_builder,
-            Section::NoEmbed => &mut no_embed_builder,
+            Section::NoEmbed => continue,
         };
 
         // Gitignore semantics don't expand `~`. Treat a leading `~/` (or
@@ -122,14 +118,10 @@ pub fn parse_smritiignore(content: &str, base_dir: &Path) -> Result<SectionRules
     let cataloged = cataloged_builder
         .build()
         .map_err(|e| SmritiError::Other(format!("failed to build catalog matcher: {e}")))?;
-    let no_embed = no_embed_builder
-        .build()
-        .map_err(|e| SmritiError::Other(format!("failed to build no-embed matcher: {e}")))?;
 
     Ok(SectionRules {
         ignored,
         cataloged,
-        no_embed,
     })
 }
 
@@ -187,8 +179,7 @@ impl IgnoreStack {
     ///
     /// Priority per layer (highest to lowest):
     ///   1. ignored   — if the ignored matcher fires → `Ignored`
-    ///   2. no_embed  — if the no_embed matcher fires → `IndexedNoEmbed`
-    ///   3. cataloged — if the cataloged matcher fires → `Cataloged`
+    ///   2. cataloged — if the cataloged matcher fires → `Cataloged`
     ///
     /// If no layer matches, returns `Indexed`.
     pub fn classify(&self, path: &Path, is_dir: bool) -> PathClassification {
@@ -219,11 +210,6 @@ fn classify_against(rules: &SectionRules, path: &Path, is_dir: bool) -> Option<P
             // still check the other sections.
         }
         Match::None => {}
-    }
-
-    match match_path(&rules.no_embed, path, is_dir) {
-        Match::Ignore(_) => return Some(PathClassification::IndexedNoEmbed),
-        Match::Whitelist(_) | Match::None => {}
     }
 
     match match_path(&rules.cataloged, path, is_dir) {

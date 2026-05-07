@@ -11,7 +11,6 @@ fn make_config(db_dir: &TempDir, root: &TempDir) -> Config {
     Config {
         db_path: db_dir.path().join("index.db"),
         roots: vec![root.path().to_path_buf()],
-        model_path: None,
         listen_addr: "unix:/tmp/smriti-watcher-test.sock".to_string(),
         stale_threshold_sec: 3600,
         fts_content_max_bytes: 102400,

@@ -125,7 +125,6 @@ pub struct CurrentEntry {
     pub mtime: i64,
     pub size_bytes: i64,
     pub short_circuited: bool,
-    pub embed_excluded: bool,
     pub doc_info: Option<DocInfo>,
 }
 
@@ -136,7 +135,6 @@ pub struct WalkEntry {
     pub size_bytes: i64,
     pub inode: u64,
     pub is_large: bool,
-    pub embed_excluded: bool,
     pub needs_hash: bool,
     pub prev_hash: Option<String>,
 }
@@ -223,8 +221,8 @@ pub fn process_path(
 
         let new_rowid: Option<i64> = conn.prepare_cached(
             "INSERT OR IGNORE INTO documents
-                (content_hash, body_hash, title, summary, topics, structure, is_binary, embed_excluded, byte_size, first_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                (content_hash, body_hash, title, summary, topics, structure, is_binary, byte_size, first_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              RETURNING rowid",
         )?.query_row(
             params![
@@ -235,7 +233,6 @@ pub fn process_path(
                 info.topics_json,
                 info.structure_json,
                 info.is_binary,
-                entry.embed_excluded,
                 entry.size_bytes,
                 now_str,
             ],
@@ -437,11 +434,7 @@ pub fn walk_roots(
                     continue;
                 }
 
-                classification @ (PathClassification::Indexed
-                | PathClassification::IndexedNoEmbed) => {
-                    let embed_excluded =
-                        matches!(classification, PathClassification::IndexedNoEmbed);
-
+                PathClassification::Indexed => {
                     if is_dir {
                         continue;
                     }
@@ -485,7 +478,6 @@ pub fn walk_roots(
                         size_bytes,
                         inode,
                         is_large,
-                        embed_excluded,
                         needs_hash,
                         prev_hash,
                     });
@@ -720,7 +712,6 @@ pub fn scan_with_heartbeat(
             mtime: we.mtime,
             size_bytes: we.size_bytes,
             short_circuited,
-            embed_excluded: we.embed_excluded,
             doc_info,
         });
     }
@@ -1130,9 +1121,8 @@ fn catalog_subtree(dir: &Path) -> (u64, u64) {
 
 fn most_restrictive(a: PathClassification, b: PathClassification) -> PathClassification {
     let rank = |c: &PathClassification| match c {
-        PathClassification::Ignored => 3,
-        PathClassification::Cataloged => 2,
-        PathClassification::IndexedNoEmbed => 1,
+        PathClassification::Ignored => 2,
+        PathClassification::Cataloged => 1,
         PathClassification::Indexed => 0,
     };
     if rank(&a) >= rank(&b) {
@@ -1148,12 +1138,6 @@ fn classify_section_rules(rules: &SectionRules, path: &Path, is_dir: bool) -> Pa
         ignore::Match::Ignore(_)
     ) {
         return PathClassification::Ignored;
-    }
-    if matches!(
-        rules.no_embed.matched(path, is_dir),
-        ignore::Match::Ignore(_)
-    ) {
-        return PathClassification::IndexedNoEmbed;
     }
     if matches!(
         rules.cataloged.matched(path, is_dir),

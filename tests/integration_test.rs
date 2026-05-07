@@ -16,7 +16,6 @@ fn test_config(tmp: &TempDir) -> Config {
     Config {
         db_path,
         roots: vec![root],
-        model_path: None,
         listen_addr: "unix:/dev/null".to_string(),
         stale_threshold_sec: 3600,
         fts_content_max_bytes: 102400,
@@ -122,7 +121,6 @@ fn test_full_lifecycle() {
     assert_eq!(health.status, "ok");
     assert_eq!(health.total_indexed, 3);
     assert!(health.last_scan.is_some());
-    assert!(!health.embedder_ok);
 }
 
 #[test]

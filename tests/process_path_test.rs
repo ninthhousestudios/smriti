@@ -11,7 +11,6 @@ fn make_config() -> (Config, TempDir) {
     let config = Config {
         db_path: db_tmp.path().join("index.db"),
         roots: vec![],
-        model_path: None,
         listen_addr: "unix:/tmp/smriti-test.sock".to_string(),
         stale_threshold_sec: 3600,
         fts_content_max_bytes: 102400,
@@ -48,7 +47,6 @@ fn make_entry(path: &str, content_hash: &str, body_hash: &str) -> CurrentEntry {
         mtime: 1000,
         size_bytes: 42,
         short_circuited: false,
-        embed_excluded: false,
         doc_info: Some(DocInfo {
             title: Some("Test".to_string()),
             summary: None,

@@ -6,7 +6,6 @@ use crate::error::{Result, SmritiError};
 pub struct Config {
     pub db_path: PathBuf,
     pub roots: Vec<PathBuf>,
-    pub model_path: Option<PathBuf>,
     pub listen_addr: String,
     pub stale_threshold_sec: u64,
     pub fts_content_max_bytes: u64,
@@ -32,10 +31,6 @@ impl Config {
             })
             .unwrap_or_default();
 
-        let model_path = std::env::var("SMRITI_MODEL_PATH")
-            .ok()
-            .map(|s| expand_tilde(&s));
-
         let listen_addr = std::env::var("SMRITI_LISTEN_ADDR").unwrap_or_else(|_| {
             let sock = default_smriti_dir().join("sock");
             format!("unix:{}", sock.display())
@@ -52,7 +47,6 @@ impl Config {
         Ok(Self {
             db_path,
             roots,
-            model_path,
             listen_addr,
             stale_threshold_sec,
             fts_content_max_bytes,

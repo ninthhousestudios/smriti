@@ -20,7 +20,6 @@ pub struct SearchHit {
     pub topics: Vec<String>,
     pub content_hash: String,
     pub byte_size: Option<i64>,
-    pub embed_excluded: bool,
     pub rank: f64,
 }
 
@@ -56,7 +55,6 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
             d.summary,
             d.topics,
             d.byte_size,
-            d.embed_excluded,
             rank
          FROM document_fts f
          JOIN documents d ON d.rowid = f.rowid
@@ -71,22 +69,20 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
         let summary: Option<String> = row.get(2)?;
         let topics_json: Option<String> = row.get(3)?;
         let byte_size: Option<i64> = row.get(4)?;
-        let embed_excluded: bool = row.get(5)?;
-        let rank: f64 = row.get(6)?;
+        let rank: f64 = row.get(5)?;
         Ok((
             content_hash,
             title,
             summary,
             topics_json,
             byte_size,
-            embed_excluded,
             rank,
         ))
     })?;
 
     let mut results = Vec::new();
     for row in rows {
-        let (content_hash, title, summary, topics_json, byte_size, embed_excluded, rank) = row?;
+        let (content_hash, title, summary, topics_json, byte_size, rank) = row?;
 
         let topics: Vec<String> = topics_json
             .and_then(|j| serde_json::from_str(&j).ok())
@@ -102,7 +98,6 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
             topics,
             content_hash,
             byte_size,
-            embed_excluded,
             rank,
         });
     }
@@ -245,74 +240,6 @@ fn glob_to_like(pattern: &str) -> String {
         out.push('%');
     }
     out
-}
-
-/// Hybrid search: BM25 + dense retrieval with RRF merge.
-/// Falls back to BM25-only if the embedding feature is disabled or embedder is None.
-#[cfg(feature = "embedding")]
-pub fn search_hybrid(
-    conn: &Connection,
-    query: &str,
-    k: u32,
-    config: &Config,
-    embedder: &mut crate::embedding::Embedder,
-) -> Result<SearchResult> {
-    let total_indexed = count_documents(conn)?;
-    let envelope = freshness_envelope(conn, config)?;
-
-    // BM25 leg
-    let bm25_result = search_fts(conn, query, k * 2, config)?;
-    let bm25_hashes: Vec<String> = bm25_result
-        .results
-        .iter()
-        .map(|h| h.content_hash.clone())
-        .collect();
-
-    // Dense leg
-    let query_embedding = embedder.embed_text(query)?;
-    let dense_results = crate::embedding::search_dense(conn, &query_embedding, k * 2)?;
-    let dense_hashes: Vec<String> = dense_results.iter().map(|(h, _)| h.clone()).collect();
-
-    // RRF merge
-    let merged = crate::embedding::rrf_merge(&bm25_hashes, &dense_hashes, 60.0);
-
-    let mut results = Vec::new();
-    for (rank, content_hash) in merged.iter().enumerate().take(k as usize) {
-        let (title, summary, topics_json, byte_size, embed_excluded) = conn.query_row(
-            "SELECT title, summary, topics, byte_size, embed_excluded FROM documents WHERE content_hash = ?1",
-            params![content_hash],
-            |row| Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, bool>(4)?,
-            )),
-        )?;
-
-        let topics: Vec<String> = topics_json
-            .and_then(|j| serde_json::from_str(&j).ok())
-            .unwrap_or_default();
-        let path =
-            current_path(conn, content_hash)?.unwrap_or_else(|| "(no current path)".to_string());
-
-        results.push(SearchHit {
-            path,
-            title,
-            summary,
-            topics,
-            content_hash: content_hash.clone(),
-            byte_size,
-            embed_excluded,
-            rank: rank as f64,
-        });
-    }
-
-    Ok(SearchResult {
-        results,
-        total_indexed,
-        envelope,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -498,8 +425,6 @@ pub struct AuditResult {
     pub tier2_total_dirs: i64,
     pub tier2_total_bytes: i64,
     pub tier2_largest: Vec<CatalogEntry>,
-    pub excluded_from_embedding_files: i64,
-    pub excluded_from_embedding_bytes: i64,
     pub roots: Vec<String>,
     pub backup_target_bytes: i64,
     #[serde(flatten)]
@@ -579,15 +504,6 @@ pub fn audit(
         .filter_map(|r| r.ok())
         .collect();
 
-    // Embed-excluded
-    let (excl_files, excl_bytes): (i64, i64) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(d.byte_size), 0)
-         FROM paths p JOIN documents d ON d.content_hash = p.content_hash
-         WHERE p.disappeared IS NULL AND d.embed_excluded = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-
     let roots: Vec<String> = config
         .roots
         .iter()
@@ -601,8 +517,6 @@ pub fn audit(
         tier2_total_dirs,
         tier2_total_bytes,
         tier2_largest,
-        excluded_from_embedding_files: excl_files,
-        excluded_from_embedding_bytes: excl_bytes,
         roots,
         backup_target_bytes: tier1_total_bytes,
         envelope,
@@ -755,7 +669,6 @@ pub struct HealthResult {
     pub total_indexed: i64,
     pub total_cataloged: i64,
     pub last_scan: Option<String>,
-    pub embedder_ok: bool,
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watcher: Option<WatcherStatus>,
@@ -790,7 +703,6 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
         total_indexed,
         total_cataloged,
         last_scan,
-        embedder_ok: config.model_path.is_some(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         watcher,
     })
