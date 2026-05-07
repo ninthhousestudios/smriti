@@ -30,6 +30,18 @@ enum WatcherMsg {
     Error(String),
 }
 
+struct WatcherCtx {
+    prev_paths: HashMap<PathBuf, PrevPathEntry>,
+    old_body_hashes: HashMap<String, String>,
+    fts_max: usize,
+}
+
+struct FileIndexed {
+    path: PathBuf,
+    prev_entry: PrevPathEntry,
+    body_hash: String,
+}
+
 pub fn run_watch(config: &Config) -> Result<()> {
     SHUTDOWN.store(false, Ordering::SeqCst);
 
@@ -101,7 +113,6 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
 
     let mut scan_config = config.clone();
     scan_config.roots = roots.clone();
-    let mut last_full_scan = Instant::now();
     match scanner::scan(&mut conn, &scan_config, &global_rules) {
         Ok(result) => {
             tracing::info!(
@@ -109,7 +120,6 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
                 result.tier1.created, result.tier1.updated, result.tier1.deleted, result.duration_ms,
             );
             update_heartbeat_scan_done(&conn, result.duration_ms)?;
-            last_full_scan = Instant::now();
         }
         Err(e) => {
             tracing::error!("startup scan failed: {e}");
@@ -120,20 +130,15 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
 
     let prev_paths = scanner::load_prev_paths(&conn)?;
     let old_body_hashes = scanner::load_old_body_hashes(&conn)?;
+    let fts_max = config.fts_content_max_bytes as usize;
 
-    let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    conn.execute(
-        "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
-        params![now_str],
-    )?;
-    let watcher_scan_id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+    tracing::info!("watching, {} roots, {} known paths", roots.len(), prev_paths.len());
 
-    tracing::info!("watching, {} roots, {} known paths, scan_id={}", roots.len(), prev_paths.len(), watcher_scan_id);
-
+    let mut ctx = WatcherCtx { prev_paths, old_body_hashes, fts_max };
     event_loop(
         &mut conn, config, &mut scan_config, &rx, &mut watcher,
         &mut roots, &global_rules,
-        prev_paths, old_body_hashes, watcher_scan_id, shutdown, last_full_scan,
+        &mut ctx, shutdown, Instant::now(),
     )?;
 
     update_heartbeat_state(&conn, "stopped")?;
@@ -293,6 +298,7 @@ fn detect_network_mounts(roots: &[PathBuf]) {
 // Roots reconciliation
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn reconcile_roots(
     watcher: &mut notify::RecommendedWatcher,
     conn: &mut Connection,
@@ -300,9 +306,7 @@ fn reconcile_roots(
     scan_config: &mut Config,
     roots: &mut Vec<PathBuf>,
     global_rules: &SectionRules,
-    prev_paths: &mut HashMap<PathBuf, PrevPathEntry>,
-    old_body_hashes: &mut HashMap<String, String>,
-    scan_id: &mut i64,
+    ctx: &mut WatcherCtx,
     last_full_scan: &mut Instant,
 ) -> Result<()> {
     let new_roots = crate::roots::load_roots(config)?;
@@ -367,16 +371,9 @@ fn reconcile_roots(
             }
         }
 
-        *prev_paths = scanner::load_prev_paths(conn)?;
-        *old_body_hashes = scanner::load_old_body_hashes(conn)?;
+        ctx.prev_paths = scanner::load_prev_paths(conn)?;
+        ctx.old_body_hashes = scanner::load_old_body_hashes(conn)?;
         *last_full_scan = Instant::now();
-
-        let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        conn.execute(
-            "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
-            params![now_str],
-        )?;
-        *scan_id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
     }
 
     tracing::info!("roots reconciled: {} active roots", roots.len());
@@ -387,14 +384,14 @@ fn reconcile_roots(
 // Shutdown drain
 // ---------------------------------------------------------------------------
 
-fn abort_running_scans(conn: &Connection, current_scan_id: i64) -> Result<()> {
+fn abort_running_scans(conn: &Connection) -> Result<()> {
     let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let count = conn.execute(
         "UPDATE scan_runs SET status = 'failed', finished_at = ?1, error = 'shutdown' WHERE status = 'running'",
         params![now_str],
     )?;
     if count > 0 {
-        tracing::info!("shutdown: aborted {} running scan_run(s) (including scan_id={})", count, current_scan_id);
+        tracing::info!("shutdown: aborted {} running scan_run(s)", count);
     }
     Ok(())
 }
@@ -405,10 +402,7 @@ fn drain_shutdown(
     debounce: &mut DebounceBuffer,
     roots: &[PathBuf],
     global_rules: &SectionRules,
-    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
-    old_body_hashes: &HashMap<String, String>,
-    fts_max: usize,
-    scan_id: i64,
+    ctx: &WatcherCtx,
 ) -> Result<()> {
     update_heartbeat_state(conn, "stopping")?;
 
@@ -423,9 +417,7 @@ fn drain_shutdown(
                 tracing::warn!("drain deadline exceeded, dropping remaining events");
                 break;
             }
-            if let Err(e) = process_flushed(
-                &tx, config, fe, roots, global_rules, prev_paths, old_body_hashes, fts_max, scan_id,
-            ) {
+            if let Err(e) = process_flushed(&tx, config, fe, roots, global_rules, ctx) {
                 tracing::error!("drain processing {}: {e}", fe.path.display());
             }
         }
@@ -434,7 +426,7 @@ fn drain_shutdown(
         }
     }
 
-    abort_running_scans(conn, scan_id)?;
+    abort_running_scans(conn)?;
     Ok(())
 }
 
@@ -451,14 +443,11 @@ fn event_loop(
     watcher: &mut notify::RecommendedWatcher,
     roots: &mut Vec<PathBuf>,
     global_rules: &SectionRules,
-    mut prev_paths: HashMap<PathBuf, PrevPathEntry>,
-    mut old_body_hashes: HashMap<String, String>,
-    mut scan_id: i64,
+    ctx: &mut WatcherCtx,
     shutdown: &AtomicBool,
     mut last_full_scan: Instant,
 ) -> Result<()> {
     let mut debounce = DebounceBuffer::with_defaults();
-    let fts_max = config.fts_content_max_bytes as usize;
     let scan_interval = Duration::from_secs(config.full_scan_interval_sec);
     let heartbeat_interval = Duration::from_secs(5);
     let mut last_heartbeat = Instant::now();
@@ -472,10 +461,7 @@ fn event_loop(
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
-            drain_shutdown(
-                conn, config, &mut debounce, roots, global_rules,
-                &prev_paths, &old_body_hashes, fts_max, scan_id,
-            )?;
+            drain_shutdown(conn, config, &mut debounce, roots, global_rules, ctx)?;
             break;
         }
 
@@ -492,7 +478,7 @@ fn event_loop(
             roots_changed = false;
             if let Err(e) = reconcile_roots(
                 watcher, conn, config, scan_config, roots, global_rules,
-                &mut prev_paths, &mut old_body_hashes, &mut scan_id, &mut last_full_scan,
+                ctx, &mut last_full_scan,
             ) {
                 tracing::error!("roots reconciliation failed: {e}");
             }
@@ -533,18 +519,11 @@ fn event_loop(
                     }
                 }
 
-                prev_paths = scanner::load_prev_paths(conn)?;
-                old_body_hashes = scanner::load_old_body_hashes(conn)?;
+                ctx.prev_paths = scanner::load_prev_paths(conn)?;
+                ctx.old_body_hashes = scanner::load_old_body_hashes(conn)?;
                 if req.kind == "full" {
                     last_full_scan = Instant::now();
                 }
-
-                let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                conn.execute(
-                    "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
-                    params![now_str],
-                )?;
-                scan_id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
             }
         }
 
@@ -567,16 +546,9 @@ fn event_loop(
                 }
             }
 
-            prev_paths = scanner::load_prev_paths(conn)?;
-            old_body_hashes = scanner::load_old_body_hashes(conn)?;
+            ctx.prev_paths = scanner::load_prev_paths(conn)?;
+            ctx.old_body_hashes = scanner::load_old_body_hashes(conn)?;
             last_full_scan = Instant::now();
-
-            let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            conn.execute(
-                "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
-                params![now_str],
-            )?;
-            scan_id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
         }
 
         let timeout = debounce
@@ -623,26 +595,16 @@ fn event_loop(
                     }
                 }
 
-                prev_paths = scanner::load_prev_paths(conn)?;
-                old_body_hashes = scanner::load_old_body_hashes(conn)?;
+                ctx.prev_paths = scanner::load_prev_paths(conn)?;
+                ctx.old_body_hashes = scanner::load_old_body_hashes(conn)?;
                 last_full_scan = Instant::now();
-
-                let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                conn.execute(
-                    "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
-                    params![now_str],
-                )?;
-                scan_id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
             }
             Ok(WatcherMsg::Error(msg)) => {
                 tracing::warn!("watcher error: {msg}");
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                drain_shutdown(
-                    conn, config, &mut debounce, roots, global_rules,
-                    &prev_paths, &old_body_hashes, fts_max, scan_id,
-                )?;
+                drain_shutdown(conn, config, &mut debounce, roots, global_rules, ctx)?;
                 break;
             }
         }
@@ -652,11 +614,11 @@ fn event_loop(
         if !flushed.is_empty() {
             tracing::debug!("flushing {} events", flushed.len());
             let tx = conn.transaction().map_err(SmritiError::Db)?;
+            let mut indexed = Vec::new();
             for fe in &flushed {
-                if let Err(e) = process_flushed(
-                    &tx, config, fe, roots, global_rules, &prev_paths, &old_body_hashes, fts_max, scan_id,
-                ) {
-                    tracing::error!("processing {}: {e}", fe.path.display());
+                match process_flushed(&tx, config, fe, roots, global_rules, ctx) {
+                    Ok(new_entries) => indexed.extend(new_entries),
+                    Err(e) => tracing::error!("processing {}: {e}", fe.path.display()),
                 }
             }
             if let Err(e) = tx.commit() {
@@ -665,7 +627,11 @@ fn event_loop(
             }
 
             for fe in &flushed {
-                update_prev_paths(&mut prev_paths, fe);
+                update_prev_paths(&mut ctx.prev_paths, fe);
+            }
+            for fi in indexed {
+                ctx.old_body_hashes.insert(fi.prev_entry.content_hash.clone(), fi.body_hash);
+                ctx.prev_paths.insert(fi.path, fi.prev_entry);
             }
 
             if let Err(e) = mark_event_processed(conn) {
@@ -713,38 +679,36 @@ fn process_flushed(
     fe: &FlushedEvent,
     roots: &[PathBuf],
     global_rules: &SectionRules,
-    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
-    old_body_hashes: &HashMap<String, String>,
-    fts_max: usize,
-    scan_id: i64,
-) -> Result<()> {
+    ctx: &WatcherCtx,
+) -> Result<Vec<FileIndexed>> {
     let root = match find_root_for_path(&fe.path, roots) {
         Some(r) => r,
-        None => return Ok(()),
+        None => return Ok(Vec::new()),
     };
 
+    let mut indexed = Vec::new();
     match &fe.kind {
         FlushedKind::Delete => {
             handle_delete(conn, &fe.path)?;
         }
         FlushedKind::Create | FlushedKind::Modify => {
             if fe.path.is_dir() {
-                handle_new_directory(conn, config, &fe.path, root, global_rules, prev_paths, old_body_hashes, fts_max, scan_id)?;
+                indexed.extend(handle_new_directory(conn, config, &fe.path, root, global_rules, ctx)?);
             } else if fe.path.is_file() {
-                handle_file(conn, config, &fe.path, root, global_rules, prev_paths, old_body_hashes, fts_max, scan_id)?;
+                indexed.extend(handle_file(conn, config, &fe.path, root, global_rules, ctx)?);
             }
         }
         FlushedKind::Moved { from } => {
             handle_delete(conn, from)?;
             if fe.path.is_dir() {
-                handle_new_directory(conn, config, &fe.path, root, global_rules, prev_paths, old_body_hashes, fts_max, scan_id)?;
+                indexed.extend(handle_new_directory(conn, config, &fe.path, root, global_rules, ctx)?);
             } else if fe.path.is_file() {
-                handle_file(conn, config, &fe.path, root, global_rules, prev_paths, old_body_hashes, fts_max, scan_id)?;
+                indexed.extend(handle_file(conn, config, &fe.path, root, global_rules, ctx)?);
             }
         }
     }
 
-    Ok(())
+    Ok(indexed)
 }
 
 fn handle_delete(conn: &Connection, path: &Path) -> Result<()> {
@@ -782,19 +746,16 @@ fn handle_file(
     path: &Path,
     root: &Path,
     global_rules: &SectionRules,
-    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
-    old_body_hashes: &HashMap<String, String>,
-    fts_max: usize,
-    scan_id: i64,
-) -> Result<()> {
+    ctx: &WatcherCtx,
+) -> Result<Option<FileIndexed>> {
     let classification = classify_path(path, global_rules);
     if classification == PathClassification::Ignored {
-        return Ok(());
+        return Ok(None);
     }
 
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(None),
     };
 
     let mtime = meta.mtime();
@@ -817,30 +778,30 @@ fn handle_file(
             }
             Err(e) => {
                 tracing::warn!("cannot hash {}: {e}", path.display());
-                return Ok(());
+                return Ok(None);
             }
         }
     } else {
         match std::fs::read(path) {
-            Ok(content) => build_doc_entry(path, &content, fts_max),
+            Ok(content) => build_doc_entry(path, &content, ctx.fts_max),
             Err(e) => {
                 tracing::warn!("cannot read {}: {e}", path.display());
-                return Ok(());
+                return Ok(None);
             }
         }
     };
 
-    let prev = prev_paths.get(path);
+    let prev = ctx.prev_paths.get(path);
     let old_body = prev
-        .and_then(|p| old_body_hashes.get(&p.content_hash))
+        .and_then(|p| ctx.old_body_hashes.get(&p.content_hash))
         .map(|s| s.as_str());
 
     let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let entry = CurrentEntry {
         path: path.to_path_buf(),
         root: root.to_path_buf(),
-        content_hash,
-        body_hash,
+        content_hash: content_hash.clone(),
+        body_hash: body_hash.clone(),
         mtime,
         size_bytes,
         short_circuited: false,
@@ -848,8 +809,13 @@ fn handle_file(
         doc_info,
     };
 
-    scanner::process_path(conn, &entry, prev, old_body, scan_id, &now_str)?;
-    Ok(())
+    scanner::process_path(conn, &entry, prev, old_body, None, &now_str)?;
+
+    Ok(Some(FileIndexed {
+        path: path.to_path_buf(),
+        prev_entry: PrevPathEntry { content_hash, mtime, size_bytes },
+        body_hash,
+    }))
 }
 
 fn handle_new_directory(
@@ -858,21 +824,21 @@ fn handle_new_directory(
     dir: &Path,
     root: &Path,
     global_rules: &SectionRules,
-    prev_paths: &HashMap<PathBuf, PrevPathEntry>,
-    old_body_hashes: &HashMap<String, String>,
-    fts_max: usize,
-    scan_id: i64,
-) -> Result<()> {
+    ctx: &WatcherCtx,
+) -> Result<Vec<FileIndexed>> {
+    let mut indexed = Vec::new();
     for entry in WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         if entry.file_type().is_file() {
-            handle_file(conn, config, entry.path(), root, global_rules, prev_paths, old_body_hashes, fts_max, scan_id)?;
+            if let Some(fi) = handle_file(conn, config, entry.path(), root, global_rules, ctx)? {
+                indexed.push(fi);
+            }
         }
     }
-    Ok(())
+    Ok(indexed)
 }
 
 fn build_doc_entry(path: &Path, content: &[u8], fts_max: usize) -> (String, String, Option<DocInfo>) {

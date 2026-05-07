@@ -586,12 +586,21 @@ fn watcher_shutdown_aborts_running_scan_runs() {
     let _ = handle.join();
 
     let conn = db::open_readonly(&config.db_path).unwrap();
-    let shutdown_count: i64 = conn
+    let running_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM scan_runs WHERE error = 'shutdown'",
+            "SELECT COUNT(*) FROM scan_runs WHERE status = 'running'",
             [],
             |r| r.get(0),
         )
         .unwrap();
-    assert!(shutdown_count >= 1, "at least one scan_run should be marked with shutdown error");
+    assert_eq!(running_count, 0, "no scan_runs should remain running after shutdown");
+
+    let complete_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM scan_runs WHERE status = 'complete'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(complete_count >= 1, "startup scan should have completed");
 }

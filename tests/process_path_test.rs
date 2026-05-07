@@ -71,7 +71,7 @@ fn process_path_create_emits_created_event() {
     let (conn, _tmp) = setup_db();
     let entry = make_entry("/tmp/root/a.txt", "hash_a", "body_a");
 
-    let outcome = scanner::process_path(&conn, &entry, None, None, 1, "2026-01-01 00:00:00")
+    let outcome = scanner::process_path(&conn, &entry, None, None, Some(1), "2026-01-01 00:00:00")
         .unwrap();
 
     let ev = outcome.event.expect("should emit Created event");
@@ -89,7 +89,7 @@ fn process_path_modify_emits_updated_event() {
 
     // First: create the path
     let entry1 = make_entry("/tmp/root/a.txt", "hash_v1", "body_v1");
-    scanner::process_path(&conn, &entry1, None, None, 1, "2026-01-01 00:00:00").unwrap();
+    scanner::process_path(&conn, &entry1, None, None, Some(1), "2026-01-01 00:00:00").unwrap();
 
     // Second: update with new content, passing prev state
     let entry2 = make_entry("/tmp/root/a.txt", "hash_v2", "body_v2");
@@ -100,7 +100,7 @@ fn process_path_modify_emits_updated_event() {
     };
 
     let outcome =
-        scanner::process_path(&conn, &entry2, Some(&prev), None, 1, "2026-01-01 00:00:00")
+        scanner::process_path(&conn, &entry2, Some(&prev), None, Some(1), "2026-01-01 00:00:00")
             .unwrap();
 
     let ev = outcome.event.expect("should emit Updated event");
@@ -116,7 +116,7 @@ fn process_path_unchanged_returns_none() {
     let (conn, _tmp) = setup_db();
 
     let entry = make_entry("/tmp/root/a.txt", "hash_a", "body_a");
-    scanner::process_path(&conn, &entry, None, None, 1, "2026-01-01 00:00:00").unwrap();
+    scanner::process_path(&conn, &entry, None, None, Some(1), "2026-01-01 00:00:00").unwrap();
 
     // Call again with same hash — prev has matching content_hash
     let prev = PrevPathEntry {
@@ -126,7 +126,7 @@ fn process_path_unchanged_returns_none() {
     };
 
     let outcome =
-        scanner::process_path(&conn, &entry, Some(&prev), None, 1, "2026-01-01 00:00:00")
+        scanner::process_path(&conn, &entry, Some(&prev), None, Some(1), "2026-01-01 00:00:00")
             .unwrap();
 
     assert!(outcome.event.is_none(), "unchanged path should not emit event");
@@ -143,7 +143,7 @@ fn process_path_idempotent() {
     let entry = make_entry("/tmp/root/a.txt", "hash_a", "body_a");
 
     // First call
-    scanner::process_path(&conn, &entry, None, None, 1, "2026-01-01 00:00:00").unwrap();
+    scanner::process_path(&conn, &entry, None, None, Some(1), "2026-01-01 00:00:00").unwrap();
 
     // Snapshot DB state after first call
     let docs_after_first: i64 = conn
@@ -158,7 +158,7 @@ fn process_path_idempotent() {
         .unwrap();
 
     // Second call with same inputs
-    scanner::process_path(&conn, &entry, None, None, 1, "2026-01-01 00:00:00").unwrap();
+    scanner::process_path(&conn, &entry, None, None, Some(1), "2026-01-01 00:00:00").unwrap();
 
     let docs_after_second: i64 = conn
         .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
@@ -187,7 +187,7 @@ fn process_path_short_circuited_updates_scan_id() {
 
     // First: create the path
     let entry = make_entry("/tmp/root/a.txt", "hash_a", "body_a");
-    scanner::process_path(&conn, &entry, None, None, 1, "2026-01-01 00:00:00").unwrap();
+    scanner::process_path(&conn, &entry, None, None, Some(1), "2026-01-01 00:00:00").unwrap();
 
     // Second: short-circuited call (mtime+size unchanged)
     let mut entry2 = make_entry("/tmp/root/a.txt", "hash_a", "");
@@ -208,7 +208,7 @@ fn process_path_short_circuited_updates_scan_id() {
     .unwrap();
 
     let outcome =
-        scanner::process_path(&conn, &entry2, Some(&prev), None, 2, "2026-01-01 00:01:00")
+        scanner::process_path(&conn, &entry2, Some(&prev), None, Some(2), "2026-01-01 00:01:00")
             .unwrap();
 
     assert!(outcome.event.is_none(), "short-circuited path should not emit event");
@@ -232,7 +232,7 @@ fn process_path_minor_change_when_only_frontmatter_changes() {
     let (conn, _tmp) = setup_db();
 
     let entry1 = make_entry("/tmp/root/a.md", "content_v1", "body_v1");
-    scanner::process_path(&conn, &entry1, None, None, 1, "2026-01-01 00:00:00").unwrap();
+    scanner::process_path(&conn, &entry1, None, None, Some(1), "2026-01-01 00:00:00").unwrap();
 
     // Change content_hash (frontmatter changed) but keep body_hash the same
     let entry2 = make_entry("/tmp/root/a.md", "content_v2", "body_v1");
@@ -247,7 +247,7 @@ fn process_path_minor_change_when_only_frontmatter_changes() {
         &entry2,
         Some(&prev),
         Some("body_v1"),
-        1,
+        Some(1),
         "2026-01-01 00:00:00",
     )
     .unwrap();
@@ -321,7 +321,7 @@ proptest! {
             &entry,
             prev.as_ref(),
             old_body.as_deref(),
-            1,
+            Some(1),
             "2026-01-01 00:00:00",
         )
         .unwrap();
@@ -334,7 +334,7 @@ proptest! {
             &entry,
             prev.as_ref(),
             old_body.as_deref(),
-            1,
+            Some(1),
             "2026-01-01 00:00:00",
         )
         .unwrap();

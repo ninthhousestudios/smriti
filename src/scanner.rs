@@ -206,7 +206,7 @@ pub fn process_path(
     entry: &CurrentEntry,
     prev: Option<&PrevPathEntry>,
     old_body_hash: Option<&str>,
-    scan_id: i64,
+    scan_id: Option<i64>,
     now_str: &str,
 ) -> Result<PathOutcome> {
     let now_dt = Utc::now();
@@ -795,7 +795,7 @@ fn flush_batch(
         let old_body = prev
             .and_then(|p| old_body_hashes.get(&p.content_hash))
             .map(|s| s.as_str());
-        let outcome = process_path(&tx, entry, prev, old_body, scan_id, now_str)?;
+        let outcome = process_path(&tx, entry, prev, old_body, Some(scan_id), now_str)?;
         if let Some(ev) = outcome.event {
             batch_events.push(ev);
         }
