@@ -218,32 +218,41 @@ fn mark_event_processed(conn: &Connection) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn watch_root_checked(watcher: &mut notify::RecommendedWatcher, root: &Path) -> Result<()> {
-    watcher.watch(root, RecursiveMode::Recursive).map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("No space left on device") || msg.contains("max_user_watches") {
-            let current_limit = std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
-                .unwrap_or_else(|_| "unknown".to_string())
-                .trim()
-                .to_string();
-            let dir_count = WalkDir::new(root)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_dir())
-                .count();
-            SmritiError::Other(format!(
-                "inotify watch limit exhausted while watching {root}.\n\
-                 Current limit: {current_limit}\n\
-                 Directories in this root: {dir_count}\n\
-                 To increase, run:\n  \
-                 sudo sysctl fs.inotify.max_user_watches=524288\n  \
-                 echo 'fs.inotify.max_user_watches=524288' | sudo tee -a /etc/sysctl.conf",
-                root = root.display(),
-            ))
-        } else {
-            SmritiError::Other(format!("Failed to watch {}: {e}", root.display()))
+    match watcher.watch(root, RecursiveMode::Recursive) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("No space left on device") || msg.contains("max_user_watches") {
+                let current_limit = std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+                    .unwrap_or_else(|_| "unknown".to_string())
+                    .trim()
+                    .to_string();
+                let dir_count = WalkDir::new(root)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_dir())
+                    .count();
+                Err(SmritiError::Other(format!(
+                    "inotify watch limit exhausted while watching {root}.\n\
+                     Current limit: {current_limit}\n\
+                     Directories in this root: {dir_count}\n\
+                     To increase, run:\n  \
+                     sudo sysctl fs.inotify.max_user_watches=524288\n  \
+                     echo 'fs.inotify.max_user_watches=524288' | sudo tee -a /etc/sysctl.conf",
+                    root = root.display(),
+                )))
+            } else if msg.contains("Permission denied") {
+                tracing::warn!(
+                    "permission denied on some subdirectories under {}, watching what we can: {e}",
+                    root.display()
+                );
+                Ok(())
+            } else {
+                Err(SmritiError::Other(format!("Failed to watch {}: {e}", root.display())))
+            }
         }
-    })
+    }
 }
 
 fn detect_network_mounts(roots: &[PathBuf]) {
