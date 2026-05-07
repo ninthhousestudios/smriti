@@ -27,7 +27,7 @@ impl Config {
             .map(|s| {
                 s.split(':')
                     .filter(|p| !p.is_empty())
-                    .map(|p| expand_tilde(p))
+                    .map(expand_tilde)
                     .collect()
             })
             .unwrap_or_default();

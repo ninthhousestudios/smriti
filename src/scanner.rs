@@ -556,7 +556,8 @@ pub fn scan(
 
     // 4. Hash + metadata phase: parallel via rayon
     let fts_max = config.fts_content_max_bytes as usize;
-    let hash_results: Vec<Option<(usize, String, String, Option<DocInfo>)>> = walk_entries
+    type HashResult = Option<(usize, String, String, Option<DocInfo>)>;
+    let hash_results: Vec<HashResult> = walk_entries
         .par_iter()
         .enumerate()
         .filter_map(|(idx, entry)| {
@@ -694,7 +695,7 @@ pub fn scan(
                     "UPDATE scan_runs SET files_seen = ?1 WHERE id = ?2",
                     params![total_files_seen as i64, scan_id],
                 )?;
-                if total_batches % 10 == 0 {
+                if total_batches.is_multiple_of(10) {
                     tracing::info!(
                         "scan {scan_id} batch {total_batches} committed: {total_files_seen} files"
                     );

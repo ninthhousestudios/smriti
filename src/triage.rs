@@ -291,10 +291,10 @@ pub fn analyze(conn: &Connection, global_rules: &SectionRules) -> Result<TriageR
                     if pct > 0.90 {
                         let mut top_exts: Vec<(String, usize)> = ext_counts
                             .iter()
-                            .filter(|(e, _)| media_family(e).map_or(false, |f| f == *family))
+                            .filter(|(e, _)| media_family(e) == Some(*family))
                             .map(|(e, c)| (e.clone(), *c))
                             .collect();
-                        top_exts.sort_by(|a, b| b.1.cmp(&a.1));
+                        top_exts.sort_by_key(|e| std::cmp::Reverse(e.1));
                         let ext_list: Vec<String> = top_exts
                             .iter()
                             .take(3)
@@ -322,7 +322,7 @@ pub fn analyze(conn: &Connection, global_rules: &SectionRules) -> Result<TriageR
         }
     }
 
-    recommendations.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    recommendations.sort_by_key(|r| std::cmp::Reverse(r.size_bytes));
 
     let mut duplicates = query_duplicates(conn)?;
 
@@ -378,7 +378,7 @@ pub fn format_triage_file(report: &TriageReport) -> String {
     let _ = writeln!(out, "#");
     let _ = writeln!(out, "# Actions:  catalog = tier 2 (size only)  |  ignore = stop tracking  |  keep = no change");
     let _ = writeln!(out, "#");
-    let _ = writeln!(out, "# {:<10}  {:<48}  {:<10}  {}", "ACTION", "PATH", "SIZE", "REASON");
+    let _ = writeln!(out, "# {:<10}  {:<48}  {:<10}  REASON", "ACTION", "PATH", "SIZE");
 
     if !report.recommendations.is_empty() {
         let _ = writeln!(out);
@@ -399,7 +399,7 @@ pub fn format_triage_file(report: &TriageReport) -> String {
     if !report.duplicates.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, "# DUPLICATES — same content at multiple paths");
-        let _ = writeln!(out, "# {:<10}  {:<48}  {:<10}  {}", "ACTION", "PATH", "SIZE", "DUPLICATE OF");
+        let _ = writeln!(out, "# {:<10}  {:<48}  {:<10}  DUPLICATE OF", "ACTION", "PATH", "SIZE");
 
         let mut dir_pairs: HashMap<(PathBuf, PathBuf), Vec<&DuplicateGroup>> = HashMap::new();
         let mut individual: Vec<&DuplicateGroup> = Vec::new();
@@ -426,7 +426,7 @@ pub fn format_triage_file(report: &TriageReport) -> String {
                 individual.extend(groups.iter());
             }
         }
-        collapsed.sort_by(|a, b| b.2.cmp(&a.2));
+        collapsed.sort_by_key(|e| std::cmp::Reverse(e.2));
 
         if !collapsed.is_empty() {
             let _ = writeln!(out);

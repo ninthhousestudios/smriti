@@ -201,9 +201,9 @@ pub fn analyze(conn: &Connection, target_root: &Path) -> Result<BackupAuditRepor
 
     let redundant_bytes: u64 = redundant.iter().map(|f| f.size_bytes).sum();
 
-    redundant.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-    unique.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-    stale.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    redundant.sort_by_key(|f| std::cmp::Reverse(f.size_bytes));
+    unique.sort_by_key(|f| std::cmp::Reverse(f.size_bytes));
+    stale.sort_by_key(|f| std::cmp::Reverse(f.size_bytes));
 
     Ok(BackupAuditReport {
         target_root: target_root.to_path_buf(),
@@ -269,8 +269,8 @@ pub fn format_audit_file(report: &BackupAuditReport) -> String {
         );
         let _ = writeln!(
             out,
-            "# {:<10}  {:<50}  {:<10}  {}",
-            "ACTION", "PATH", "SIZE", "ALSO AT"
+            "# {:<10}  {:<50}  {:<10}  ALSO AT",
+            "ACTION", "PATH", "SIZE"
         );
         let _ = writeln!(out);
 
@@ -298,7 +298,7 @@ pub fn format_audit_file(report: &BackupAuditReport) -> String {
         let _ = writeln!(out);
         let _ = writeln!(out, "# UNIQUE — exists only on this root");
         let _ = writeln!(out, "# (no action needed — listed for awareness)");
-        let _ = writeln!(out, "# {:<10}  {:<50}  {}", "ACTION", "PATH", "SIZE");
+        let _ = writeln!(out, "# {:<10}  {:<50}  SIZE", "ACTION", "PATH");
         let _ = writeln!(out);
 
         for f in &report.unique {
@@ -316,8 +316,8 @@ pub fn format_audit_file(report: &BackupAuditReport) -> String {
         );
         let _ = writeln!(
             out,
-            "# {:<10}  {:<50}  {:<10}  {:<50}  {:<12}  {}",
-            "ACTION", "PATH", "SIZE", "NEWER AT", "TARGET DATE", "LIVE DATE"
+            "# {:<10}  {:<50}  {:<10}  {:<50}  {:<12}  LIVE DATE",
+            "ACTION", "PATH", "SIZE", "NEWER AT", "TARGET DATE"
         );
         let _ = writeln!(out);
 

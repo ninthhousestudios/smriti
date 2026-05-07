@@ -126,10 +126,7 @@ fn extract_markdown_metadata(path: &Path, content: &[u8]) -> DocumentMetadata {
     let mut paragraph_buf = String::new();
 
     // 1-indexed line counter; body starts after frontmatter so we number from 1.
-    let mut line_num: u32 = 0;
-
-    for raw_line in body_str.lines() {
-        line_num += 1;
+    for (line_num, raw_line) in (1_u32..).zip(body_str.lines()) {
         let line = raw_line.trim_end();
 
         if let Some(heading_text) = parse_heading(line) {

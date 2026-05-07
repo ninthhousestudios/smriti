@@ -298,7 +298,7 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, f
     if !result.tier1_by_extension.is_empty() {
         println!("  By extension:");
         let mut exts: Vec<_> = result.tier1_by_extension.iter().collect();
-        exts.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes));
+        exts.sort_by_key(|e| std::cmp::Reverse(e.1.bytes));
         for (ext, stats) in exts.iter().take(ext_limit) {
             println!("    {:<12} {:>6} files  {}", ext, stats.files, format_bytes(stats.bytes));
         }

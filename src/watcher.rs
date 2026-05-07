@@ -113,7 +113,8 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
         }
         Err(e) => {
             tracing::error!("startup scan failed: {e}");
-            update_heartbeat_state(&conn, "watching")?;
+            update_heartbeat_state(&conn, "stopped")?;
+            return Err(e);
         }
     }
 
@@ -587,7 +588,7 @@ fn event_loop(
         match rx.recv_timeout(timeout) {
             Ok(WatcherMsg::Event(event)) => {
                 // Detect roots.conf changes
-                if event.paths.iter().any(|p| *p == roots_conf) {
+                if event.paths.contains(&roots_conf) {
                     roots_changed = true;
                     last_roots_change = Instant::now();
                 }

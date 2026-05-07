@@ -305,12 +305,9 @@ impl SmritiServer {
             response.insert("cataloged".to_string(), serde_json::to_value(&cataloged).unwrap_or_default());
         }
 
-        match search::health(&conn, &self.config) {
-            Ok(h) => {
-                response.insert("total_indexed".to_string(), serde_json::json!(h.total_indexed));
-                response.insert("total_cataloged".to_string(), serde_json::json!(h.total_cataloged));
-            }
-            Err(_) => {}
+        if let Ok(h) = search::health(&conn, &self.config) {
+            response.insert("total_indexed".to_string(), serde_json::json!(h.total_indexed));
+            response.insert("total_cataloged".to_string(), serde_json::json!(h.total_cataloged));
         }
 
         with_freshness(&conn, serde_json::Value::Object(response).to_string())
