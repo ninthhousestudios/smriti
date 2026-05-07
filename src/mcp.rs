@@ -10,6 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::db::ScanEnqueuer;
 use crate::envelope::FreshnessEnvelope;
 use crate::privacy::PrivacyGate;
 use crate::search;
@@ -21,8 +22,7 @@ use crate::search;
 #[derive(Clone)]
 pub struct SmritiServer {
     db: Arc<Mutex<Connection>>,
-    /// Only for scan_requests INSERTs — do not use for general writes.
-    enqueue_db: Arc<Mutex<Connection>>,
+    enqueue_db: Arc<Mutex<ScanEnqueuer>>,
     audit_db: Arc<Mutex<Connection>>,
     config: Arc<Config>,
     #[allow(dead_code)]
@@ -131,7 +131,7 @@ fn with_freshness(conn: &Connection, json: String) -> String {
 impl SmritiServer {
     pub fn new(
         db: Arc<Mutex<Connection>>,
-        enqueue_db: Arc<Mutex<Connection>>,
+        enqueue_db: Arc<Mutex<ScanEnqueuer>>,
         audit_db: Arc<Mutex<Connection>>,
         config: Arc<Config>,
     ) -> Self {
@@ -170,8 +170,8 @@ impl SmritiServer {
         };
 
         let req_id = {
-            let wconn = self.enqueue_db.lock().unwrap();
-            match crate::db::enqueue_scan(&wconn, kind, root_json.as_deref()) {
+            let enqueuer = self.enqueue_db.lock().unwrap();
+            match enqueuer.enqueue_scan(kind, root_json.as_deref()) {
                 Ok(id) => id,
                 Err(e) => return format!("Failed to enqueue scan: {e}"),
             }

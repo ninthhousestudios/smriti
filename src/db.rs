@@ -230,6 +230,20 @@ pub fn enqueue_scan(conn: &Connection, kind: &str, root: Option<&str>) -> Result
     Ok(id)
 }
 
+/// Write-capability wrapper that exposes only scan-request INSERTs.
+/// Enforces ADR 0001's single-writer invariant at the type level.
+pub struct ScanEnqueuer(Connection);
+
+impl ScanEnqueuer {
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self(open_connection(path)?))
+    }
+
+    pub fn enqueue_scan(&self, kind: &str, root: Option<&str>) -> Result<i64> {
+        enqueue_scan(&self.0, kind, root)
+    }
+}
+
 #[derive(Debug)]
 pub struct ScanRequest {
     pub id: i64,
@@ -495,5 +509,27 @@ mod tests {
 
         drop(_lock);
         assert!(!watcher_holds_lock(&db_path), "lock released");
+    }
+
+    #[test]
+    fn test_serve_readonly_while_writer_lock_held() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("index.db");
+
+        // Watcher creates DB and holds writer.lock
+        let _writer_conn = open(&db_path).unwrap();
+        let _lock = acquire_writer_lock(&db_path).unwrap();
+
+        // Serve opens read-only — must succeed without migrations
+        let ro = open_readonly(&db_path).unwrap();
+        let count: i64 = ro
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // ScanEnqueuer opens without running migrations
+        let enqueuer = ScanEnqueuer::open(&db_path).unwrap();
+        let id = enqueuer.enqueue_scan("full", None).unwrap();
+        assert!(id > 0);
     }
 }

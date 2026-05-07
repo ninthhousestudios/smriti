@@ -8,17 +8,12 @@ use crate::config::Config;
 use crate::mcp::SmritiServer;
 
 pub async fn run_stdio(config: Config) -> anyhow::Result<()> {
-    // Run migrations once with a write connection, then close it. The
-    // persistent server connection is read-only — if smriti-serve held an
-    // rw connection while `smriti scan` (CLI) ran, two writer-capable
-    // processes would share the wal-index SHM mmap and the scan would
-    // SIGBUS in walCheckpoint. Writes go through smriti_scan which opens
-    // a fresh writer connection on demand.
-    drop(crate::db::open(&config.db_path)?);
+    // Serve is read-only — migrations are watcher's responsibility (ADR 0001).
+    // ScanEnqueuer is the only write path, narrowed to scan_requests INSERTs.
     let conn = crate::db::open_readonly(&config.db_path)?;
     let db = Arc::new(Mutex::new(conn));
-    let enqueue_conn = crate::db::open(&config.db_path)?;
-    let enqueue_db = Arc::new(Mutex::new(enqueue_conn));
+    let enqueuer = crate::db::ScanEnqueuer::open(&config.db_path)?;
+    let enqueue_db = Arc::new(Mutex::new(enqueuer));
     let audit_dir = config.db_path.parent().unwrap_or(std::path::Path::new("."));
     let audit_conn = crate::db::open_audit(audit_dir)?;
     let audit_db = Arc::new(Mutex::new(audit_conn));
@@ -40,11 +35,10 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
     };
     use tokio_util::sync::CancellationToken;
 
-    drop(crate::db::open(&config.db_path)?);
     let conn = crate::db::open_readonly(&config.db_path)?;
     let db = Arc::new(Mutex::new(conn));
-    let enqueue_conn = crate::db::open(&config.db_path)?;
-    let enqueue_db = Arc::new(Mutex::new(enqueue_conn));
+    let enqueuer = crate::db::ScanEnqueuer::open(&config.db_path)?;
+    let enqueue_db = Arc::new(Mutex::new(enqueuer));
     let audit_dir = config.db_path.parent().unwrap_or(std::path::Path::new("."));
     let audit_conn = crate::db::open_audit(audit_dir)?;
     let audit_db = Arc::new(Mutex::new(audit_conn));
