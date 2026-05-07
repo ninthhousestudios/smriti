@@ -189,6 +189,7 @@ fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<us
         return cmd_scan_via_watcher(config, filter_paths);
     }
 
+    let _lock = smriti::db::acquire_writer_lock(&config.db_path)?;
     let (mut conn, scan_config, global_rules) =
         smriti::scanner::prepare_scan(config, filter_paths, jobs)?;
     let result = smriti::scanner::scan(&mut conn, &scan_config, &global_rules)?;

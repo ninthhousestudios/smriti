@@ -21,7 +21,8 @@ use crate::search;
 #[derive(Clone)]
 pub struct SmritiServer {
     db: Arc<Mutex<Connection>>,
-    write_db: Arc<Mutex<Connection>>,
+    /// Only for scan_requests INSERTs — do not use for general writes.
+    enqueue_db: Arc<Mutex<Connection>>,
     audit_db: Arc<Mutex<Connection>>,
     config: Arc<Config>,
     #[allow(dead_code)]
@@ -128,10 +129,10 @@ fn with_freshness(conn: &Connection, json: String) -> String {
 
 #[tool_router]
 impl SmritiServer {
-    pub fn new(db: Arc<Mutex<Connection>>, write_db: Arc<Mutex<Connection>>, audit_db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
+    pub fn new(db: Arc<Mutex<Connection>>, enqueue_db: Arc<Mutex<Connection>>, audit_db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
         Self {
             db,
-            write_db,
+            enqueue_db,
             audit_db,
             config,
             tool_router: Self::tool_router(),
@@ -161,7 +162,7 @@ impl SmritiServer {
         };
 
         let req_id = {
-            let wconn = self.write_db.lock().unwrap();
+            let wconn = self.enqueue_db.lock().unwrap();
             match crate::db::enqueue_scan(&wconn, kind, root_json.as_deref()) {
                 Ok(id) => id,
                 Err(e) => return format!("Failed to enqueue scan: {e}"),
