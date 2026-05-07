@@ -15,9 +15,7 @@ pub fn hash_content(content: &[u8]) -> String {
 pub fn hash_file(path: &Path) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let file = File::open(path).map_err(SmritiError::Io)?;
-    hasher
-        .update_reader(file)
-        .map_err(SmritiError::Io)?;
+    hasher.update_reader(file).map_err(SmritiError::Io)?;
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -61,7 +59,7 @@ pub fn split_frontmatter(content: &[u8]) -> (Option<&[u8]>, &[u8]) {
                         after_open.len() == after_close || after_open[after_close] == b'\n';
                     if line_ends {
                         let frontmatter = &after_open[..search_pos + rel]; // exclude the '\n' before close tag
-                        // Body starts after the closing delimiter line (including its '\n').
+                                                                           // Body starts after the closing delimiter line (including its '\n').
                         let body_start = delimiter.len()
                             + after_close
                             + if after_open.len() > after_close { 1 } else { 0 };
@@ -145,7 +143,9 @@ mod tests {
         let fm = fm.unwrap();
         assert!(fm.contains(&b't'), "frontmatter should contain content");
         assert!(std::str::from_utf8(fm).unwrap().contains("title: Hello"));
-        assert!(std::str::from_utf8(body).unwrap().contains("Body text here."));
+        assert!(std::str::from_utf8(body)
+            .unwrap()
+            .contains("Body text here."));
         // Delimiter lines must not appear in either slice.
         assert!(!std::str::from_utf8(fm).unwrap().starts_with("---"));
         assert!(!std::str::from_utf8(body).unwrap().starts_with("---"));
@@ -196,6 +196,9 @@ mod tests {
         let doc = b"# Just a heading\n\nSome text.\n";
         let (fm, body) = split_frontmatter(doc);
         assert!(fm.is_none(), "expected no frontmatter");
-        assert_eq!(body, doc, "body should equal full content when no frontmatter");
+        assert_eq!(
+            body, doc,
+            "body should equal full content when no frontmatter"
+        );
     }
 }

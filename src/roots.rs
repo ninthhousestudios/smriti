@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, expand_tilde};
+use crate::config::{expand_tilde, Config};
 use crate::error::Result;
 
 pub struct RootEntry {
@@ -17,7 +17,11 @@ pub fn load_roots(config: &Config) -> Result<Vec<PathBuf>> {
     if !config.roots.is_empty() {
         return Ok(config.roots.clone());
     }
-    Ok(list_all_roots()?.into_iter().filter(|e| e.enabled).map(|e| e.path).collect())
+    Ok(list_all_roots()?
+        .into_iter()
+        .filter(|e| e.enabled)
+        .map(|e| e.path)
+        .collect())
 }
 
 pub fn list_all_roots() -> Result<Vec<RootEntry>> {
@@ -36,7 +40,10 @@ pub fn list_all_roots() -> Result<Vec<RootEntry>> {
             } else {
                 (true, l)
             };
-            RootEntry { path: expand_tilde(raw), enabled }
+            RootEntry {
+                path: expand_tilde(raw),
+                enabled,
+            }
         })
         .collect();
     Ok(entries)

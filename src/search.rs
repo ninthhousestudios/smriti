@@ -1,7 +1,7 @@
 //! Search, audit, manifest, health, and history queries against the smriti index.
 
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use crate::config::Config;
@@ -64,7 +64,15 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
         let byte_size: Option<i64> = row.get(4)?;
         let embed_excluded: bool = row.get(5)?;
         let rank: f64 = row.get(6)?;
-        Ok((content_hash, title, summary, topics_json, byte_size, embed_excluded, rank))
+        Ok((
+            content_hash,
+            title,
+            summary,
+            topics_json,
+            byte_size,
+            embed_excluded,
+            rank,
+        ))
     })?;
 
     let mut results = Vec::new();
@@ -75,8 +83,8 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default();
 
-        let path = current_path(conn, &content_hash)?
-            .unwrap_or_else(|| "(no current path)".to_string());
+        let path =
+            current_path(conn, &content_hash)?.unwrap_or_else(|| "(no current path)".to_string());
 
         results.push(SearchHit {
             path,
@@ -90,7 +98,11 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
         });
     }
 
-    Ok(SearchResult { results, total_indexed, envelope })
+    Ok(SearchResult {
+        results,
+        total_indexed,
+        envelope,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +164,11 @@ pub fn search_path(
         });
     }
 
-    Ok(PathSearchResult { results, total_matched, envelope })
+    Ok(PathSearchResult {
+        results,
+        total_matched,
+        envelope,
+    })
 }
 
 pub fn search_extension(
@@ -193,7 +209,11 @@ pub fn search_extension(
         });
     }
 
-    Ok(PathSearchResult { results, total_matched, envelope })
+    Ok(PathSearchResult {
+        results,
+        total_matched,
+        envelope,
+    })
 }
 
 fn glob_to_like(pattern: &str) -> String {
@@ -233,7 +253,11 @@ pub fn search_hybrid(
 
     // BM25 leg
     let bm25_result = search_fts(conn, query, k * 2, config)?;
-    let bm25_hashes: Vec<String> = bm25_result.results.iter().map(|h| h.content_hash.clone()).collect();
+    let bm25_hashes: Vec<String> = bm25_result
+        .results
+        .iter()
+        .map(|h| h.content_hash.clone())
+        .collect();
 
     // Dense leg
     let query_embedding = embedder.embed_text(query)?;
@@ -260,8 +284,8 @@ pub fn search_hybrid(
         let topics: Vec<String> = topics_json
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default();
-        let path = current_path(conn, content_hash)?
-            .unwrap_or_else(|| "(no current path)".to_string());
+        let path =
+            current_path(conn, content_hash)?.unwrap_or_else(|| "(no current path)".to_string());
 
         results.push(SearchHit {
             path,
@@ -275,7 +299,11 @@ pub fn search_hybrid(
         });
     }
 
-    Ok(SearchResult { results, total_indexed, envelope })
+    Ok(SearchResult {
+        results,
+        total_indexed,
+        envelope,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -295,22 +323,30 @@ pub struct DocumentInfo {
     pub envelope: FreshnessEnvelope,
 }
 
-pub fn get_document(conn: &Connection, content_hash: &str, config: &Config) -> Result<DocumentInfo> {
+pub fn get_document(
+    conn: &Connection,
+    content_hash: &str,
+    config: &Config,
+) -> Result<DocumentInfo> {
     let envelope = freshness_envelope(conn, config)?;
 
-    let (title, summary, topics_json, byte_size) = conn.query_row(
-        "SELECT title, summary, topics, byte_size FROM documents WHERE content_hash = ?1",
-        params![content_hash],
-        |row| Ok((
-            row.get::<_, Option<String>>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<i64>>(3)?,
-        )),
-    ).map_err(|_| SmritiError::NotFound {
-        entity: "document".to_string(),
-        id: content_hash.to_string(),
-    })?;
+    let (title, summary, topics_json, byte_size) = conn
+        .query_row(
+            "SELECT title, summary, topics, byte_size FROM documents WHERE content_hash = ?1",
+            params![content_hash],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .map_err(|_| SmritiError::NotFound {
+            entity: "document".to_string(),
+            id: content_hash.to_string(),
+        })?;
 
     let topics: Vec<String> = topics_json
         .and_then(|j| serde_json::from_str(&j).ok())
@@ -364,11 +400,13 @@ pub fn history(
     let envelope = freshness_envelope(conn, config)?;
 
     // Find the content hash(es) associated with this path.
-    let content_hash: Option<String> = conn.query_row(
-        "SELECT content_hash FROM paths WHERE path = ?1 AND disappeared IS NULL LIMIT 1",
-        params![path],
-        |row| row.get(0),
-    ).ok();
+    let content_hash: Option<String> = conn
+        .query_row(
+            "SELECT content_hash FROM paths WHERE path = ?1 AND disappeared IS NULL LIMIT 1",
+            params![path],
+            |row| row.get(0),
+        )
+        .ok();
 
     let mut sql = String::from(
         "SELECT event_type, timestamp, path, previous_path, previous_hash
@@ -386,7 +424,8 @@ pub fn history(
     }
     sql.push_str(" ORDER BY timestamp ASC");
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
         Ok(HistoryEvent {
@@ -405,12 +444,15 @@ pub fn history(
             "SELECT COUNT(DISTINCT content_hash) FROM events WHERE path = ?1",
             params![path],
             |row| row.get(0),
-        ).unwrap_or(0)
+        )
+        .unwrap_or(0)
     } else {
         0
     };
 
-    let current_path = content_hash.as_ref().and_then(|h| current_path(conn, h).ok().flatten());
+    let current_path = content_hash
+        .as_ref()
+        .and_then(|h| current_path(conn, h).ok().flatten());
 
     Ok(HistoryResult {
         current_path,
@@ -489,7 +531,9 @@ pub fn audit(
                 .extension()
                 .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
                 .unwrap_or_else(|| "(none)".to_string());
-            let entry = by_extension.entry(ext).or_insert(ExtensionStats { files: 0, bytes: 0 });
+            let entry = by_extension
+                .entry(ext)
+                .or_insert(ExtensionStats { files: 0, bytes: 0 });
             entry.files += 1;
             entry.bytes += size.unwrap_or(0);
         }
@@ -514,14 +558,17 @@ pub fn audit(
          ORDER BY {order} LIMIT 20"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let tier2_largest: Vec<CatalogEntry> = stmt.query_map(params![min_filter], |row| {
-        Ok(CatalogEntry {
-            path: row.get(0)?,
-            total_bytes: row.get(1)?,
-            file_count: row.get(2)?,
-            regenerable: row.get(3)?,
-        })
-    })?.filter_map(|r| r.ok()).collect();
+    let tier2_largest: Vec<CatalogEntry> = stmt
+        .query_map(params![min_filter], |row| {
+            Ok(CatalogEntry {
+                path: row.get(0)?,
+                total_bytes: row.get(1)?,
+                file_count: row.get(2)?,
+                regenerable: row.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Embed-excluded
     let (excl_files, excl_bytes): (i64, i64) = conn.query_row(
@@ -532,7 +579,11 @@ pub fn audit(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
-    let roots: Vec<String> = config.roots.iter().map(|r| r.to_string_lossy().to_string()).collect();
+    let roots: Vec<String> = config
+        .roots
+        .iter()
+        .map(|r| r.to_string_lossy().to_string())
+        .collect();
 
     Ok(AuditResult {
         tier1_total_files,
@@ -584,8 +635,11 @@ pub fn manifest(conn: &Connection, format: &str, config: &Config) -> Result<Mani
                 "path": path,
                 "content_hash": hash,
                 "byte_size": size,
-            }).to_string())
-        })?.filter_map(|r| r.ok()).collect()
+            })
+            .to_string())
+        })?
+        .filter_map(|r| r.ok())
+        .collect()
     } else {
         stmt.query_map([], |row| row.get::<_, String>(0))?
             .filter_map(|r| r.ok())
@@ -622,7 +676,7 @@ pub fn read_watcher_status(conn: &Connection) -> Result<Option<WatcherStatus>> {
     let mut stmt = conn.prepare(
         "SELECT pid, started_at, updated_at, state, watch_count, pending_events,
                 last_event_processed_at, last_full_scan_at, last_full_scan_duration_ms
-         FROM watcher_heartbeat WHERE id = 1"
+         FROM watcher_heartbeat WHERE id = 1",
     )?;
 
     let row = stmt.query_row([], |row| {
@@ -640,8 +694,17 @@ pub fn read_watcher_status(conn: &Connection) -> Result<Option<WatcherStatus>> {
     });
 
     match row {
-        Ok((pid, started_at, updated_at, state, watch_count, pending_events,
-            last_event_processed_at, last_full_scan_at, last_full_scan_duration_ms)) => {
+        Ok((
+            pid,
+            started_at,
+            updated_at,
+            state,
+            watch_count,
+            pending_events,
+            last_event_processed_at,
+            last_full_scan_at,
+            last_full_scan_duration_ms,
+        )) => {
             let updated = chrono::NaiveDateTime::parse_from_str(&updated_at, "%Y-%m-%d %H:%M:%S")
                 .ok()
                 .map(|dt| dt.and_utc());
@@ -650,7 +713,9 @@ pub fn read_watcher_status(conn: &Connection) -> Result<Option<WatcherStatus>> {
                 .map(|dt| dt.and_utc());
 
             let now = Utc::now();
-            let stale = updated.map(|u| (now - u).num_seconds() > 30).unwrap_or(true);
+            let stale = updated
+                .map(|u| (now - u).num_seconds() > 30)
+                .unwrap_or(true);
             let running = !stale && state != "stopped";
             let uptime_seconds = started.map(|s| (now - s).num_seconds()).unwrap_or(0);
 
@@ -690,19 +755,22 @@ pub struct HealthResult {
 pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
     let total_indexed = count_documents(conn)?;
 
-    let total_cataloged: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM catalog",
-        [],
-        |row| row.get(0),
-    )?;
+    let total_cataloged: i64 =
+        conn.query_row("SELECT COUNT(*) FROM catalog", [], |row| row.get(0))?;
 
-    let last_scan: Option<String> = conn.query_row(
-        "SELECT timestamp FROM snapshots ORDER BY id DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    ).ok();
+    let last_scan: Option<String> = conn
+        .query_row(
+            "SELECT timestamp FROM snapshots ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
 
-    let roots: Vec<String> = config.roots.iter().map(|r| r.to_string_lossy().to_string()).collect();
+    let roots: Vec<String> = config
+        .roots
+        .iter()
+        .map(|r| r.to_string_lossy().to_string())
+        .collect();
 
     let watcher = read_watcher_status(conn).unwrap_or(None);
 
@@ -728,29 +796,34 @@ fn count_documents(conn: &Connection) -> Result<i64> {
 }
 
 fn current_path(conn: &Connection, content_hash: &str) -> Result<Option<String>> {
-    Ok(conn.query_row(
-        "SELECT path FROM paths WHERE content_hash = ?1 AND disappeared IS NULL LIMIT 1",
-        params![content_hash],
-        |row| row.get(0),
-    ).ok())
+    Ok(conn
+        .query_row(
+            "SELECT path FROM paths WHERE content_hash = ?1 AND disappeared IS NULL LIMIT 1",
+            params![content_hash],
+            |row| row.get(0),
+        )
+        .ok())
 }
 
 fn all_current_paths(conn: &Connection, content_hash: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT path FROM paths WHERE content_hash = ?1 AND disappeared IS NULL ORDER BY path",
     )?;
-    let paths: Vec<String> = stmt.query_map(params![content_hash], |row| row.get(0))?
+    let paths: Vec<String> = stmt
+        .query_map(params![content_hash], |row| row.get(0))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(paths)
 }
 
 fn freshness_envelope(conn: &Connection, config: &Config) -> Result<FreshnessEnvelope> {
-    let last_scan: Option<String> = conn.query_row(
-        "SELECT timestamp FROM snapshots ORDER BY id DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    ).ok();
+    let last_scan: Option<String> = conn
+        .query_row(
+            "SELECT timestamp FROM snapshots ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
 
     let as_of = last_scan
         .and_then(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok())

@@ -18,8 +18,8 @@ use tracing::warn;
 use ignore::Match;
 
 use crate::error::{Result, SmritiError};
-use crate::ignore::SectionRules;
 use crate::hasher::hash_content;
+use crate::ignore::SectionRules;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -66,7 +66,10 @@ impl PrivacyGate {
             }
         }
 
-        Ok(Self { roots: canonical_roots, global_rules })
+        Ok(Self {
+            roots: canonical_roots,
+            global_rules,
+        })
     }
 
     /// Validate that `path` may be read.
@@ -154,7 +157,9 @@ impl PrivacyGate {
 
         self.log_read(audit_conn, &canonical, &content_hash, caller)?;
 
-        Ok(ReadResult { content, content_hash })
+        Ok(ReadResult {
+            content,
+            content_hash,
+        })
     }
 }
-

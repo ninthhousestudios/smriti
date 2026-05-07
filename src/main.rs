@@ -9,7 +9,11 @@ use smriti::roots;
 use smriti::search;
 
 #[derive(Parser)]
-#[command(name = "smriti", about = "Content-addressed filesystem indexer", version)]
+#[command(
+    name = "smriti",
+    about = "Content-addressed filesystem indexer",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -65,9 +69,7 @@ enum Commands {
         limit: u32,
     },
     /// Look up a document by content hash
-    Get {
-        content_hash: String,
-    },
+    Get { content_hash: String },
     /// Show lifecycle history for a file path
     History {
         path: String,
@@ -146,9 +148,28 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init => cmd_init(&config)?,
         Commands::Scan { paths, jobs } => cmd_scan(&config, paths, jobs)?,
-        Commands::Audit { min_bytes, sort_by, full, ext, tier2 } => cmd_audit(&config, min_bytes, sort_by, full, ext.as_deref(), tier2)?,
+        Commands::Audit {
+            min_bytes,
+            sort_by,
+            full,
+            ext,
+            tier2,
+        } => cmd_audit(&config, min_bytes, sort_by, full, ext.as_deref(), tier2)?,
         Commands::Manifest { format } => cmd_manifest(&config, &format)?,
-        Commands::Find { query, k, path, ext, limit } => cmd_find(&config, query.as_deref(), k, path.as_deref(), ext.as_deref(), limit)?,
+        Commands::Find {
+            query,
+            k,
+            path,
+            ext,
+            limit,
+        } => cmd_find(
+            &config,
+            query.as_deref(),
+            k,
+            path.as_deref(),
+            ext.as_deref(),
+            limit,
+        )?,
         Commands::Get { content_hash } => cmd_get(&config, &content_hash)?,
         Commands::History { path, since, until } => cmd_history(&config, &path, since, until)?,
         Commands::Roots { action } => cmd_roots(action)?,
@@ -179,12 +200,18 @@ fn cmd_init(config: &Config) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let _conn = smriti::db::open(&config.db_path)?;
-    println!("Initialized smriti database at {}", config.db_path.display());
+    println!(
+        "Initialized smriti database at {}",
+        config.db_path.display()
+    );
     Ok(())
 }
 
-
-fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<usize>) -> Result<()> {
+fn cmd_scan(
+    config: &Config,
+    filter_paths: Option<Vec<PathBuf>>,
+    jobs: Option<usize>,
+) -> Result<()> {
     if smriti::db::watcher_holds_lock(&config.db_path) {
         return cmd_scan_via_watcher(config, filter_paths);
     }
@@ -203,10 +230,7 @@ fn cmd_scan(config: &Config, filter_paths: Option<Vec<PathBuf>>, jobs: Option<us
         result.tier1.deleted,
         result.tier1.total,
     );
-    println!(
-        "Tier 2: {} dirs cataloged",
-        result.tier2.cataloged,
-    );
+    println!("Tier 2: {} dirs cataloged", result.tier2.cataloged,);
     Ok(())
 }
 
@@ -256,14 +280,24 @@ fn cmd_scan_via_watcher(config: &Config, filter_paths: Option<Vec<PathBuf>>) -> 
     }
 }
 
-fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, full: bool, ext: Option<&str>, tier2: bool) -> Result<()> {
+fn cmd_audit(
+    config: &Config,
+    min_bytes: Option<u64>,
+    sort_by: Option<String>,
+    full: bool,
+    ext: Option<&str>,
+    tier2: bool,
+) -> Result<()> {
     let conn = smriti::db::open_readonly(&config.db_path)?;
     let mut audit_config = config.clone();
     audit_config.roots = roots::load_roots(config)?;
 
     if let Some(ext) = ext {
         let result = search::search_extension(&conn, ext, u32::MAX, config)?;
-        return print_path_results(&result, &format!("extension .{}", ext.trim_start_matches('.')));
+        return print_path_results(
+            &result,
+            &format!("extension .{}", ext.trim_start_matches('.')),
+        );
     }
 
     let result = search::audit(&conn, min_bytes, sort_by.as_deref(), &audit_config)?;
@@ -279,7 +313,11 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, f
                     format_bytes(entry.total_bytes),
                     entry.path,
                     entry.file_count,
-                    if entry.regenerable { " [regenerable]" } else { "" },
+                    if entry.regenerable {
+                        " [regenerable]"
+                    } else {
+                        ""
+                    },
                 );
             }
         }
@@ -290,7 +328,14 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, f
     let tier2_limit = if full { usize::MAX } else { 5 };
 
     println!("=== Backup Audit ===\n");
-    println!("Roots: {}", if result.roots.is_empty() { "(none)".to_string() } else { result.roots.join(", ") });
+    println!(
+        "Roots: {}",
+        if result.roots.is_empty() {
+            "(none)".to_string()
+        } else {
+            result.roots.join(", ")
+        }
+    );
     println!();
 
     println!("Tier 1 (indexed — back this up):");
@@ -301,10 +346,18 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, f
         let mut exts: Vec<_> = result.tier1_by_extension.iter().collect();
         exts.sort_by_key(|e| std::cmp::Reverse(e.1.bytes));
         for (ext, stats) in exts.iter().take(ext_limit) {
-            println!("    {:<12} {:>6} files  {}", ext, stats.files, format_bytes(stats.bytes));
+            println!(
+                "    {:<12} {:>6} files  {}",
+                ext,
+                stats.files,
+                format_bytes(stats.bytes)
+            );
         }
         if exts.len() > ext_limit {
-            println!("    ... and {} more extensions (use --full to see all)", exts.len() - ext_limit);
+            println!(
+                "    ... and {} more extensions (use --full to see all)",
+                exts.len() - ext_limit
+            );
         }
     }
     println!();
@@ -323,7 +376,10 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, f
             );
         }
         if result.tier2_largest.len() > tier2_limit {
-            println!("    ... and {} more (use --full or --tier2 to see all)", result.tier2_largest.len() - tier2_limit);
+            println!(
+                "    ... and {} more (use --full or --tier2 to see all)",
+                result.tier2_largest.len() - tier2_limit
+            );
         }
     }
     println!();
@@ -337,8 +393,14 @@ fn cmd_audit(config: &Config, min_bytes: Option<u64>, sort_by: Option<String>, f
         println!();
     }
 
-    println!("Backup target: {}", format_bytes(result.backup_target_bytes));
-    println!("Freshness: as_of={}, stale={}", result.envelope.as_of, result.envelope.is_stale);
+    println!(
+        "Backup target: {}",
+        format_bytes(result.backup_target_bytes)
+    );
+    println!(
+        "Freshness: as_of={}, stale={}",
+        result.envelope.as_of, result.envelope.is_stale
+    );
 
     Ok(())
 }
@@ -354,12 +416,22 @@ fn cmd_manifest(config: &Config, format: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_find(config: &Config, query: Option<&str>, k: u32, path: Option<&str>, ext: Option<&str>, limit: u32) -> Result<()> {
+fn cmd_find(
+    config: &Config,
+    query: Option<&str>,
+    k: u32,
+    path: Option<&str>,
+    ext: Option<&str>,
+    limit: u32,
+) -> Result<()> {
     let conn = smriti::db::open_readonly(&config.db_path)?;
 
     if let Some(ext) = ext {
         let result = search::search_extension(&conn, ext, limit, config)?;
-        return print_path_results(&result, &format!("extension .{}", ext.trim_start_matches('.')));
+        return print_path_results(
+            &result,
+            &format!("extension .{}", ext.trim_start_matches('.')),
+        );
     }
 
     if let Some(pattern) = path {
@@ -375,10 +447,19 @@ fn cmd_find(config: &Config, query: Option<&str>, k: u32, path: Option<&str>, ex
         return Ok(());
     }
 
-    println!("Found {} results (of {} indexed):\n", result.results.len(), result.total_indexed);
+    println!(
+        "Found {} results (of {} indexed):\n",
+        result.results.len(),
+        result.total_indexed
+    );
     for (i, hit) in result.results.iter().enumerate() {
         let title = hit.title.as_deref().unwrap_or("(untitled)");
-        println!("{}. {} [{}]", i + 1, title, hit.content_hash.get(..12).unwrap_or(&hit.content_hash));
+        println!(
+            "{}. {} [{}]",
+            i + 1,
+            title,
+            hit.content_hash.get(..12).unwrap_or(&hit.content_hash)
+        );
         println!("   Path: {}", hit.path);
         if let Some(ref summary) = hit.summary {
             println!("   {summary}");
@@ -403,17 +484,30 @@ fn print_path_results(result: &search::PathSearchResult, label: &str) -> Result<
     let total = result.total_matched;
 
     if showing < total {
-        println!("Showing {} of {} files matching {} ({} in shown):\n",
-            showing, total, label, format_bytes(total_bytes));
+        println!(
+            "Showing {} of {} files matching {} ({} in shown):\n",
+            showing,
+            total,
+            label,
+            format_bytes(total_bytes)
+        );
     } else {
-        println!("Found {} files matching {} ({}):\n", total, label, format_bytes(total_bytes));
+        println!(
+            "Found {} files matching {} ({}):\n",
+            total,
+            label,
+            format_bytes(total_bytes)
+        );
     }
     for hit in &result.results {
         let size = format_bytes(hit.byte_size);
         println!("  {:<10}  {}", size, hit.path);
     }
     if showing < total {
-        println!("\n  ... {} more (use --limit to show more)", total - showing);
+        println!(
+            "\n  ... {} more (use --limit to show more)",
+            total - showing
+        );
     }
 
     Ok(())
@@ -448,7 +542,12 @@ fn cmd_get(config: &Config, content_hash: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_history(config: &Config, path: &str, since: Option<String>, until: Option<String>) -> Result<()> {
+fn cmd_history(
+    config: &Config,
+    path: &str,
+    since: Option<String>,
+    until: Option<String>,
+) -> Result<()> {
     let conn = smriti::db::open_readonly(&config.db_path)?;
     let result = search::history(&conn, path, since.as_deref(), until.as_deref(), config)?;
 
@@ -557,7 +656,14 @@ fn cmd_health(config: &Config) -> Result<()> {
     } else {
         println!("Last scan: never");
     }
-    println!("Embedder:  {}", if result.embedder_ok { "available" } else { "not configured" });
+    println!(
+        "Embedder:  {}",
+        if result.embedder_ok {
+            "available"
+        } else {
+            "not configured"
+        }
+    );
     if !result.roots.is_empty() {
         println!("Roots:");
         for r in &result.roots {

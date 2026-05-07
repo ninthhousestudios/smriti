@@ -109,11 +109,18 @@ fn test_tier1_read_allowed() {
     let gate = make_gate(vec![root_dir.path().to_path_buf()], root_dir.path());
 
     let result = gate.read_file(&audit_conn, &file, None);
-    assert!(result.is_ok(), "expected Ok, got: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "expected Ok, got: {:?}",
+        result.unwrap_err()
+    );
 
     let rr = result.unwrap();
     assert!(!rr.content.is_empty(), "content must not be empty");
-    assert!(!rr.content_hash.is_empty(), "content_hash must not be empty");
+    assert!(
+        !rr.content_hash.is_empty(),
+        "content_hash must not be empty"
+    );
     assert_eq!(rr.content, b"# My Notes\n\nSome content.");
 }
 
@@ -140,20 +147,22 @@ fn test_read_audit_logging() {
         .unwrap();
     assert_eq!(before, 0);
 
-    gate.read_file(&audit_conn, &file, Some("test-caller")).unwrap();
+    gate.read_file(&audit_conn, &file, Some("test-caller"))
+        .unwrap();
 
     let after: i64 = audit_conn
         .query_row("SELECT COUNT(*) FROM read_audit", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(after, 1, "exactly one audit row should be inserted per read");
+    assert_eq!(
+        after, 1,
+        "exactly one audit row should be inserted per read"
+    );
 
     // Verify the stored values make sense.
     let (stored_path, stored_caller): (String, Option<String>) = audit_conn
-        .query_row(
-            "SELECT path, caller FROM read_audit LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+        .query_row("SELECT path, caller FROM read_audit LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .unwrap();
 
     assert!(
@@ -257,7 +266,11 @@ fn test_non_home_root() {
     let gate = make_gate(vec![tmp_root.path().to_path_buf()], tmp_root.path());
 
     let result = gate.read_file(&audit_conn, &file, Some("backup-agent"));
-    assert!(result.is_ok(), "non-home root should work; got: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "non-home root should work; got: {:?}",
+        result.unwrap_err()
+    );
 
     let rr = result.unwrap();
     assert_eq!(rr.content, b"file1.tar.gz\nfile2.tar.gz\n");
@@ -279,7 +292,10 @@ fn test_nonexistent_root_skipped() {
     let fake_root = PathBuf::from("/tmp/smriti-nonexistent-root-xyzzy-12345");
     let rules = hardened_defaults(Path::new("/tmp"));
     let gate = PrivacyGate::new(vec![fake_root], rules);
-    assert!(gate.is_ok(), "PrivacyGate::new must succeed even when root doesn't exist");
+    assert!(
+        gate.is_ok(),
+        "PrivacyGate::new must succeed even when root doesn't exist"
+    );
 }
 
 // ---------------------------------------------------------------------------

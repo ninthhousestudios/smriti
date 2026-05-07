@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -129,7 +129,12 @@ fn with_freshness(conn: &Connection, json: String) -> String {
 
 #[tool_router]
 impl SmritiServer {
-    pub fn new(db: Arc<Mutex<Connection>>, enqueue_db: Arc<Mutex<Connection>>, audit_db: Arc<Mutex<Connection>>, config: Arc<Config>) -> Self {
+    pub fn new(
+        db: Arc<Mutex<Connection>>,
+        enqueue_db: Arc<Mutex<Connection>>,
+        audit_db: Arc<Mutex<Connection>>,
+        config: Arc<Config>,
+    ) -> Self {
         Self {
             db,
             enqueue_db,
@@ -139,7 +144,9 @@ impl SmritiServer {
         }
     }
 
-    #[tool(description = "Trigger a scan cycle over allowlisted roots. Enqueues a scan request for the watcher daemon and polls for completion. Fails fast if watcher is not running.")]
+    #[tool(
+        description = "Trigger a scan cycle over allowlisted roots. Enqueues a scan request for the watcher daemon and polls for completion. Fails fast if watcher is not running."
+    )]
     async fn smriti_scan(&self, Parameters(p): Parameters<ScanParams>) -> String {
         {
             let conn = self.db.lock().unwrap();
@@ -149,7 +156,8 @@ impl SmritiServer {
                 return serde_json::json!({
                     "error": "watcher not running",
                     "detail": reason,
-                }).to_string();
+                })
+                .to_string();
             }
         }
 
@@ -181,7 +189,8 @@ impl SmritiServer {
                     "error": "scan request timed out",
                     "request_id": req_id,
                     "elapsed_sec": start.elapsed().as_secs(),
-                }).to_string();
+                })
+                .to_string();
             }
 
             let status = {
@@ -201,40 +210,56 @@ impl SmritiServer {
                         "scan_run_id": status.scan_run_id,
                         "files_seen": status.files_seen,
                         "duration_ms": status.duration_ms,
-                    }).to_string();
+                    })
+                    .to_string();
                 }
                 "failed" => {
                     return serde_json::json!({
                         "status": "failed",
                         "request_id": req_id,
                         "error": status.error,
-                    }).to_string();
+                    })
+                    .to_string();
                 }
                 _ => continue,
             }
         }
     }
 
-    #[tool(description = "Search indexed files by content. Returns matching documents with paths and metadata.")]
+    #[tool(
+        description = "Search indexed files by content. Returns matching documents with paths and metadata."
+    )]
     async fn smriti_find(&self, Parameters(p): Parameters<FindParams>) -> String {
         let conn = self.db.lock().unwrap();
         let k = p.k.unwrap_or(10);
         match search::search_fts(&conn, &p.query, k, &self.config) {
-            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
+            Ok(result) => with_freshness(
+                &conn,
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|e| format!("Serialization error: {e}")),
+            ),
             Err(e) => format!("Search error: {e}"),
         }
     }
 
-    #[tool(description = "Look up a document by its content hash. Returns metadata and current paths.")]
+    #[tool(
+        description = "Look up a document by its content hash. Returns metadata and current paths."
+    )]
     async fn smriti_get(&self, Parameters(p): Parameters<GetParams>) -> String {
         let conn = self.db.lock().unwrap();
         match search::get_document(&conn, &p.content_hash, &self.config) {
-            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
+            Ok(result) => with_freshness(
+                &conn,
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|e| format!("Serialization error: {e}")),
+            ),
             Err(e) => format!("Not found: {e}"),
         }
     }
 
-    #[tool(description = "Read a tier-1 file through the privacy gate. Enforces allowlist and ignore rules.")]
+    #[tool(
+        description = "Read a tier-1 file through the privacy gate. Enforces allowlist and ignore rules."
+    )]
     async fn smriti_read(&self, Parameters(p): Parameters<ReadParams>) -> String {
         let conn = self.db.lock().unwrap();
         let audit_conn = self.audit_db.lock().unwrap();
@@ -247,19 +272,20 @@ impl SmritiServer {
 
         let path = match (p.path, p.content_hash) {
             (Some(path), _) => path,
-            (None, Some(hash)) => {
-                match search::get_document(&conn, &hash, config) {
-                    Ok(doc) => match doc.path {
-                        Some(p) => p,
-                        None => return "No current path for this content hash.".to_string(),
-                    },
-                    Err(e) => return format!("Not found: {e}"),
-                }
-            }
+            (None, Some(hash)) => match search::get_document(&conn, &hash, config) {
+                Ok(doc) => match doc.path {
+                    Some(p) => p,
+                    None => return "No current path for this content hash.".to_string(),
+                },
+                Err(e) => return format!("Not found: {e}"),
+            },
             (None, None) => return "Either path or content_hash is required.".to_string(),
         };
 
-        let gate = match PrivacyGate::new(roots, crate::ignore::hardened_defaults(std::path::Path::new("/"))) {
+        let gate = match PrivacyGate::new(
+            roots,
+            crate::ignore::hardened_defaults(std::path::Path::new("/")),
+        ) {
             Ok(g) => g,
             Err(e) => return format!("Privacy gate error: {e}"),
         };
@@ -272,7 +298,8 @@ impl SmritiServer {
                         "content_hash": result.content_hash,
                         "is_binary": true,
                         "byte_size": result.content.len(),
-                    }).to_string()
+                    })
+                    .to_string()
                 } else {
                     let text = String::from_utf8_lossy(&result.content);
                     serde_json::json!({
@@ -281,7 +308,8 @@ impl SmritiServer {
                         "content": text,
                         "is_binary": false,
                         "byte_size": result.content.len(),
-                    }).to_string()
+                    })
+                    .to_string()
                 }
             }
             Err(e) => format!("Read error: {e}"),
@@ -299,16 +327,28 @@ impl SmritiServer {
 
         if tier == "indexed" || tier == "all" {
             let indexed = query_indexed_map(&conn, prefix);
-            response.insert("indexed".to_string(), serde_json::to_value(&indexed).unwrap_or_default());
+            response.insert(
+                "indexed".to_string(),
+                serde_json::to_value(&indexed).unwrap_or_default(),
+            );
         }
         if tier == "cataloged" || tier == "all" {
             let cataloged = query_cataloged_map(&conn, prefix);
-            response.insert("cataloged".to_string(), serde_json::to_value(&cataloged).unwrap_or_default());
+            response.insert(
+                "cataloged".to_string(),
+                serde_json::to_value(&cataloged).unwrap_or_default(),
+            );
         }
 
         if let Ok(h) = search::health(&conn, &self.config) {
-            response.insert("total_indexed".to_string(), serde_json::json!(h.total_indexed));
-            response.insert("total_cataloged".to_string(), serde_json::json!(h.total_cataloged));
+            response.insert(
+                "total_indexed".to_string(),
+                serde_json::json!(h.total_indexed),
+            );
+            response.insert(
+                "total_cataloged".to_string(),
+                serde_json::json!(h.total_cataloged),
+            );
         }
 
         with_freshness(&conn, serde_json::Value::Object(response).to_string())
@@ -318,18 +358,25 @@ impl SmritiServer {
     async fn smriti_outline(&self, Parameters(p): Parameters<OutlineParams>) -> String {
         let conn = self.db.lock().unwrap();
 
-        let content_hash: Option<String> = conn.query_row(
-            "SELECT content_hash FROM paths WHERE path = ?1 AND disappeared IS NULL LIMIT 1",
-            rusqlite::params![p.path],
-            |row| row.get(0),
-        ).ok();
+        let content_hash: Option<String> = conn
+            .query_row(
+                "SELECT content_hash FROM paths WHERE path = ?1 AND disappeared IS NULL LIMIT 1",
+                rusqlite::params![p.path],
+                |row| row.get(0),
+            )
+            .ok();
 
         let hash = match content_hash {
             Some(h) => h,
             None => return format!("No indexed file at path: {}", p.path),
         };
 
-        let (title, summary, structure_json, topics_json): (Option<String>, Option<String>, Option<String>, Option<String>) = match conn.query_row(
+        let (title, summary, structure_json, topics_json): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = match conn.query_row(
             "SELECT title, summary, structure, topics FROM documents WHERE content_hash = ?1",
             rusqlite::params![hash],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -348,39 +395,69 @@ impl SmritiServer {
         }).to_string())
     }
 
-    #[tool(description = "Lifecycle history of a file: events showing creates, moves, updates, deletes.")]
+    #[tool(
+        description = "Lifecycle history of a file: events showing creates, moves, updates, deletes."
+    )]
     async fn smriti_history(&self, Parameters(p): Parameters<HistoryParams>) -> String {
         let conn = self.db.lock().unwrap();
-        match search::history(&conn, &p.path, p.since.as_deref(), p.until.as_deref(), &self.config) {
-            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
+        match search::history(
+            &conn,
+            &p.path,
+            p.since.as_deref(),
+            p.until.as_deref(),
+            &self.config,
+        ) {
+            Ok(result) => with_freshness(
+                &conn,
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|e| format!("Serialization error: {e}")),
+            ),
             Err(e) => format!("History error: {e}"),
         }
     }
 
-    #[tool(description = "Backup audit report: tier-1 (back this up) vs tier-2 (regenerable) breakdown.")]
+    #[tool(
+        description = "Backup audit report: tier-1 (back this up) vs tier-2 (regenerable) breakdown."
+    )]
     async fn smriti_audit(&self, Parameters(p): Parameters<AuditParams>) -> String {
         let conn = self.db.lock().unwrap();
         match search::audit(&conn, p.min_bytes, p.sort_by.as_deref(), &self.config) {
-            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
+            Ok(result) => with_freshness(
+                &conn,
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|e| format!("Serialization error: {e}")),
+            ),
             Err(e) => format!("Audit error: {e}"),
         }
     }
 
-    #[tool(description = "Bulk export of tier-1 file paths for backup tooling (rsync, restic, borg).")]
+    #[tool(
+        description = "Bulk export of tier-1 file paths for backup tooling (rsync, restic, borg)."
+    )]
     async fn smriti_manifest(&self, Parameters(p): Parameters<ManifestParams>) -> String {
         let conn = self.db.lock().unwrap();
         let format = p.format.as_deref().unwrap_or("paths");
         match search::manifest(&conn, format, &self.config) {
-            Ok(result) => with_freshness(&conn, serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}"))),
+            Ok(result) => with_freshness(
+                &conn,
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|e| format!("Serialization error: {e}")),
+            ),
             Err(e) => format!("Manifest error: {e}"),
         }
     }
 
-    #[tool(description = "Health check: database status, roots, last scan time, embedder availability.")]
-    async fn smriti_health(&self, #[allow(unused)] Parameters(_p): Parameters<HealthParams>) -> String {
+    #[tool(
+        description = "Health check: database status, roots, last scan time, embedder availability."
+    )]
+    async fn smriti_health(
+        &self,
+        #[allow(unused)] Parameters(_p): Parameters<HealthParams>,
+    ) -> String {
         let conn = self.db.lock().unwrap();
         match search::health(&conn, &self.config) {
-            Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("Serialization error: {e}")),
+            Ok(result) => serde_json::to_string(&result)
+                .unwrap_or_else(|e| format!("Serialization error: {e}")),
             Err(e) => format!("Health error: {e}"),
         }
     }
@@ -419,12 +496,14 @@ struct CatalogedEntry {
 
 fn query_indexed_map(conn: &Connection, prefix: &str) -> Vec<IndexedEntry> {
     let like_pattern = format!("{prefix}%");
-    let mut stmt = conn.prepare(
-        "SELECT p.path, d.title, d.topics
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.path, d.title, d.topics
          FROM paths p JOIN documents d ON d.content_hash = p.content_hash
          WHERE p.disappeared IS NULL AND p.path LIKE ?1
          ORDER BY p.path LIMIT 500",
-    ).unwrap();
+        )
+        .unwrap();
     stmt.query_map(rusqlite::params![like_pattern], |row| {
         let topics_json: Option<String> = row.get(2)?;
         let topics: Vec<String> = topics_json
@@ -435,15 +514,20 @@ fn query_indexed_map(conn: &Connection, prefix: &str) -> Vec<IndexedEntry> {
             title: row.get(1)?,
             topics,
         })
-    }).unwrap().filter_map(|r| r.ok()).collect()
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
 }
 
 fn query_cataloged_map(conn: &Connection, prefix: &str) -> Vec<CatalogedEntry> {
     let like_pattern = format!("{prefix}%");
-    let mut stmt = conn.prepare(
-        "SELECT path, total_bytes, file_count, regenerable FROM catalog
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, total_bytes, file_count, regenerable FROM catalog
          WHERE path LIKE ?1 ORDER BY path LIMIT 500",
-    ).unwrap();
+        )
+        .unwrap();
     stmt.query_map(rusqlite::params![like_pattern], |row| {
         Ok(CatalogedEntry {
             path: row.get(0)?,
@@ -451,5 +535,8 @@ fn query_cataloged_map(conn: &Connection, prefix: &str) -> Vec<CatalogedEntry> {
             file_count: row.get(2)?,
             regenerable: row.get(3)?,
         })
-    }).unwrap().filter_map(|r| r.ok()).collect()
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
 }

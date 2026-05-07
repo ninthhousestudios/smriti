@@ -49,7 +49,11 @@ impl SectionRules {
     pub fn empty() -> Self {
         let g = |d: &Path| GitignoreBuilder::new(d).build().unwrap();
         let root = Path::new("/");
-        Self { ignored: g(root), cataloged: g(root), no_embed: g(root) }
+        Self {
+            ignored: g(root),
+            cataloged: g(root),
+            no_embed: g(root),
+        }
     }
 
     pub fn classify(&self, path: &Path, is_dir: bool) -> PathClassification {
@@ -122,7 +126,11 @@ pub fn parse_smritiignore(content: &str, base_dir: &Path) -> Result<SectionRules
         .build()
         .map_err(|e| SmritiError::Other(format!("failed to build no-embed matcher: {e}")))?;
 
-    Ok(SectionRules { ignored, cataloged, no_embed })
+    Ok(SectionRules {
+        ignored,
+        cataloged,
+        no_embed,
+    })
 }
 
 /// Compile the hardened defaults embedded in the binary.
@@ -149,7 +157,10 @@ pub struct IgnoreStack {
 
 impl IgnoreStack {
     pub fn new(global: SectionRules) -> Self {
-        Self { global, layers: Vec::new() }
+        Self {
+            global,
+            layers: Vec::new(),
+        }
     }
 
     /// Check whether `dir` contains a `.smritiignore` file. If so, parse it
@@ -199,11 +210,7 @@ impl IgnoreStack {
 ///
 /// Returns `None` if none of the matchers fire (so the caller can continue
 /// to a less-specific layer).
-fn classify_against(
-    rules: &SectionRules,
-    path: &Path,
-    is_dir: bool,
-) -> Option<PathClassification> {
+fn classify_against(rules: &SectionRules, path: &Path, is_dir: bool) -> Option<PathClassification> {
     // `ignored` has highest priority within a layer.
     match match_path(&rules.ignored, path, is_dir) {
         Match::Ignore(_) => return Some(PathClassification::Ignored),
@@ -244,6 +251,10 @@ pub fn load_user_smritiignore() -> SectionRules {
 ///
 /// Uses `Gitignore::matched` which handles prefix-stripping internally and
 /// does not panic on absolute paths.
-fn match_path<'a>(gi: &'a Gitignore, path: &Path, is_dir: bool) -> Match<&'a ignore::gitignore::Glob> {
+fn match_path<'a>(
+    gi: &'a Gitignore,
+    path: &Path,
+    is_dir: bool,
+) -> Match<&'a ignore::gitignore::Glob> {
     gi.matched(path, is_dir)
 }

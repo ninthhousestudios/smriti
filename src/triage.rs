@@ -102,9 +102,15 @@ const BUILD_MANIFESTS: &[&str] = &[
     "Makefile",
 ];
 
-const AUDIO_EXTS: &[&str] = &["mp3", "flac", "ogg", "m4a", "aac", "wav", "opus", "wma", "aiff"];
-const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "ts"];
-const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "heic", "raw", "cr2", "nef"];
+const AUDIO_EXTS: &[&str] = &[
+    "mp3", "flac", "ogg", "m4a", "aac", "wav", "opus", "wma", "aiff",
+];
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "ts",
+];
+const IMAGE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "heic", "raw", "cr2", "nef",
+];
 
 fn canonical_score(rules: &SectionRules, path: &Path) -> i32 {
     let mut score: i32 = 100;
@@ -203,7 +209,9 @@ pub fn analyze(conn: &Connection, global_rules: &SectionRules) -> Result<TriageR
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_ascii_lowercase();
-                let entry = dir_stats.entry(parent.to_path_buf()).or_insert((0, 0, Vec::new()));
+                let entry = dir_stats
+                    .entry(parent.to_path_buf())
+                    .or_insert((0, 0, Vec::new()));
                 entry.0 += size;
                 entry.1 += 1;
                 if !ext.is_empty() {
@@ -226,7 +234,11 @@ pub fn analyze(conn: &Connection, global_rules: &SectionRules) -> Result<TriageR
             continue;
         }
 
-        let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let dir_name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
 
         if dir.starts_with(&xdg_cache) || dir.starts_with(&trash) {
             seen_dirs.insert(dir.clone());
@@ -245,9 +257,9 @@ pub fn analyze(conn: &Connection, global_rules: &SectionRules) -> Result<TriageR
         }
 
         if REGENERABLE_DIRS.contains(&dir_name.as_str()) {
-            let manifest = dir.parent().and_then(|parent| {
-                BUILD_MANIFESTS.iter().find(|m| parent.join(m).exists())
-            });
+            let manifest = dir
+                .parent()
+                .and_then(|parent| BUILD_MANIFESTS.iter().find(|m| parent.join(m).exists()));
 
             let reason = match (dir_name.as_str(), manifest) {
                 ("target", Some(m)) => Some(format!("cargo build output ({m} in parent)")),
@@ -281,7 +293,10 @@ pub fn analyze(conn: &Connection, global_rules: &SectionRules) -> Result<TriageR
                 let mut family_counts: HashMap<&'static str, usize> = HashMap::new();
                 let mut ext_counts: HashMap<String, usize> = HashMap::new();
                 for ext in exts {
-                    ext_counts.entry(ext.clone()).and_modify(|c| *c += 1).or_insert(1);
+                    ext_counts
+                        .entry(ext.clone())
+                        .and_modify(|c| *c += 1)
+                        .or_insert(1);
                     if let Some(family) = media_family(ext) {
                         *family_counts.entry(family).or_insert(0) += 1;
                     }
@@ -363,7 +378,11 @@ fn query_duplicates(conn: &Connection) -> Result<Vec<DuplicateGroup>> {
             .map(PathBuf::from)
             .collect();
         if paths.len() > 1 {
-            groups.push(DuplicateGroup { content_hash, size_bytes, paths });
+            groups.push(DuplicateGroup {
+                content_hash,
+                size_bytes,
+                paths,
+            });
         }
     }
     Ok(groups)
@@ -376,9 +395,16 @@ pub fn format_triage_file(report: &TriageReport) -> String {
     let _ = writeln!(out, "# smriti triage — {date}");
     let _ = writeln!(out, "# Edit the ACTION column. Save and close to apply.");
     let _ = writeln!(out, "#");
-    let _ = writeln!(out, "# Actions:  catalog = tier 2 (size only)  |  ignore = stop tracking  |  keep = no change");
+    let _ = writeln!(
+        out,
+        "# Actions:  catalog = tier 2 (size only)  |  ignore = stop tracking  |  keep = no change"
+    );
     let _ = writeln!(out, "#");
-    let _ = writeln!(out, "# {:<10}  {:<48}  {:<10}  REASON", "ACTION", "PATH", "SIZE");
+    let _ = writeln!(
+        out,
+        "# {:<10}  {:<48}  {:<10}  REASON",
+        "ACTION", "PATH", "SIZE"
+    );
 
     if !report.recommendations.is_empty() {
         let _ = writeln!(out);
@@ -399,14 +425,20 @@ pub fn format_triage_file(report: &TriageReport) -> String {
     if !report.duplicates.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, "# DUPLICATES — same content at multiple paths");
-        let _ = writeln!(out, "# {:<10}  {:<48}  {:<10}  DUPLICATE OF", "ACTION", "PATH", "SIZE");
+        let _ = writeln!(
+            out,
+            "# {:<10}  {:<48}  {:<10}  DUPLICATE OF",
+            "ACTION", "PATH", "SIZE"
+        );
 
         let mut dir_pairs: HashMap<(PathBuf, PathBuf), Vec<&DuplicateGroup>> = HashMap::new();
         let mut individual: Vec<&DuplicateGroup> = Vec::new();
 
         for group in &report.duplicates {
             if group.paths.len() == 2 {
-                if let (Some(canonical), Some(dup)) = (group.paths[0].parent(), group.paths[1].parent()) {
+                if let (Some(canonical), Some(dup)) =
+                    (group.paths[0].parent(), group.paths[1].parent())
+                {
                     if canonical != dup {
                         let key = (canonical.to_path_buf(), dup.to_path_buf());
                         dir_pairs.entry(key).or_default().push(group);
@@ -430,7 +462,10 @@ pub fn format_triage_file(report: &TriageReport) -> String {
 
         if !collapsed.is_empty() {
             let _ = writeln!(out);
-            let _ = writeln!(out, "# Directory duplicates (files with same content in both dirs)");
+            let _ = writeln!(
+                out,
+                "# Directory duplicates (files with same content in both dirs)"
+            );
             for (canonical_dir, dup_dir, total, count) in &collapsed {
                 let _ = writeln!(
                     out,
@@ -461,10 +496,7 @@ pub fn format_triage_file(report: &TriageReport) -> String {
                     let _ = writeln!(
                         out,
                         "{:<10}  {:<48}  {:<10}  {}",
-                        action,
-                        path_str,
-                        size_str,
-                        dup_of,
+                        action, path_str, size_str, dup_of,
                     );
                 }
             }
@@ -542,7 +574,10 @@ pub fn apply_triage(decisions: &[(Action, PathBuf)]) -> Result<ApplyResult> {
 
     let applied = ignore_entries.len() + catalog_entries.len();
     if applied == 0 {
-        return Ok(ApplyResult { applied: 0, messages: Vec::new() });
+        return Ok(ApplyResult {
+            applied: 0,
+            messages: Vec::new(),
+        });
     }
 
     let mut new_content = existing.clone();
@@ -558,7 +593,10 @@ pub fn apply_triage(decisions: &[(Action, PathBuf)]) -> Result<ApplyResult> {
             new_content.push_str(entry);
             new_content.push('\n');
         }
-        messages.push(format!("Added {} ignore pattern(s) to ~/.smritiignore", ignore_entries.len()));
+        messages.push(format!(
+            "Added {} ignore pattern(s) to ~/.smritiignore",
+            ignore_entries.len()
+        ));
     }
 
     if !catalog_entries.is_empty() {
@@ -589,7 +627,10 @@ pub fn apply_triage(decisions: &[(Action, PathBuf)]) -> Result<ApplyResult> {
         }
         new_content = lines.join("\n");
         new_content.push('\n');
-        messages.push(format!("Added {} catalog pattern(s) to ~/.smritiignore", catalog_entries.len()));
+        messages.push(format!(
+            "Added {} catalog pattern(s) to ~/.smritiignore",
+            catalog_entries.len()
+        ));
     }
 
     std::fs::write(&ignore_path, &new_content)?;

@@ -36,11 +36,10 @@ impl Config {
             .ok()
             .map(|s| expand_tilde(&s));
 
-        let listen_addr = std::env::var("SMRITI_LISTEN_ADDR")
-            .unwrap_or_else(|_| {
-                let sock = default_smriti_dir().join("sock");
-                format!("unix:{}", sock.display())
-            });
+        let listen_addr = std::env::var("SMRITI_LISTEN_ADDR").unwrap_or_else(|_| {
+            let sock = default_smriti_dir().join("sock");
+            format!("unix:{}", sock.display())
+        });
 
         let stale_threshold_sec = parse_env_or("SMRITI_STALE_THRESHOLD_SEC", 3600u64)?;
         let fts_content_max_bytes = parse_env_or("SMRITI_FTS_CONTENT_MAX_BYTES", 102400u64)?;

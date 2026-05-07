@@ -372,7 +372,11 @@ mod tests {
         let mut buf = DebounceBuffer::new(ms(1000), ms(5000), ms(100), ms(1000));
         let t0 = Instant::now();
 
-        buf.insert(path("/appeared.txt"), FsEventKind::MovedTo { cookie: 77 }, t0);
+        buf.insert(
+            path("/appeared.txt"),
+            FsEventKind::MovedTo { cookie: 77 },
+            t0,
+        );
 
         let flushed = buf.flush(t0 + ms(1000));
         assert_eq!(flushed.len(), 1);
@@ -418,8 +422,16 @@ mod tests {
         let t0 = Instant::now();
 
         buf.insert(path("/a.txt"), FsEventKind::Create, t0);
-        buf.insert(path("/a.txt"), FsEventKind::MovedFrom { cookie: 10 }, t0 + ms(50));
-        buf.insert(path("/b.txt"), FsEventKind::MovedTo { cookie: 10 }, t0 + ms(51));
+        buf.insert(
+            path("/a.txt"),
+            FsEventKind::MovedFrom { cookie: 10 },
+            t0 + ms(50),
+        );
+        buf.insert(
+            path("/b.txt"),
+            FsEventKind::MovedTo { cookie: 10 },
+            t0 + ms(51),
+        );
 
         let flushed = buf.flush(t0 + ms(1100));
         assert_eq!(flushed.len(), 1);

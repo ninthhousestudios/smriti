@@ -11,7 +11,7 @@ mod inner {
     use ndarray::Axis;
     use ort::session::Session;
     use ort::value::Tensor;
-    use rusqlite::{Connection, params};
+    use rusqlite::{params, Connection};
 
     use crate::error::{Result, SmritiError};
 
@@ -55,7 +55,11 @@ mod inner {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "bge-m3".to_string());
 
-            Ok(Self { session, tokenizer, model_id })
+            Ok(Self {
+                session,
+                tokenizer,
+                model_id,
+            })
         }
 
         pub fn model_id(&self) -> &str {
@@ -63,19 +67,26 @@ mod inner {
         }
 
         pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>> {
-            let encoding = self.tokenizer
+            let encoding = self
+                .tokenizer
                 .encode(text, true)
                 .map_err(|e| SmritiError::Other(format!("Tokenization error: {e}")))?;
 
-            let ids: Vec<i64> = encoding.get_ids().iter()
+            let ids: Vec<i64> = encoding
+                .get_ids()
+                .iter()
                 .take(MAX_TOKENS)
                 .map(|&id| id as i64)
                 .collect();
-            let attention: Vec<i64> = encoding.get_attention_mask().iter()
+            let attention: Vec<i64> = encoding
+                .get_attention_mask()
+                .iter()
                 .take(MAX_TOKENS)
                 .map(|&m| m as i64)
                 .collect();
-            let token_types: Vec<i64> = encoding.get_type_ids().iter()
+            let token_types: Vec<i64> = encoding
+                .get_type_ids()
+                .iter()
                 .take(MAX_TOKENS)
                 .map(|&t| t as i64)
                 .collect();
@@ -89,10 +100,13 @@ mod inner {
             let types_tensor = Tensor::from_array((vec![1i64, seq_len as i64], token_types))
                 .map_err(|e| SmritiError::Other(format!("Tensor error: {e}")))?;
 
-            let outputs = self.session.run(ort::inputs![ids_tensor, attn_tensor, types_tensor])
+            let outputs = self
+                .session
+                .run(ort::inputs![ids_tensor, attn_tensor, types_tensor])
                 .map_err(|e| SmritiError::Other(format!("ORT inference error: {e}")))?;
 
-            let output_view = outputs[0].try_extract_array::<f32>()
+            let output_view = outputs[0]
+                .try_extract_array::<f32>()
                 .map_err(|e| SmritiError::Other(format!("Tensor extraction error: {e}")))?;
 
             // BGE-M3 output shape: [batch=1, seq_len, hidden_dim]
@@ -157,7 +171,12 @@ mod inner {
         }
     }
 
-    pub fn store_embedding(conn: &Connection, content_hash: &str, embedding: &[f32], model_id: &str) -> Result<()> {
+    pub fn store_embedding(
+        conn: &Connection,
+        content_hash: &str,
+        embedding: &[f32],
+        model_id: &str,
+    ) -> Result<()> {
         let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
 
         conn.execute(
@@ -173,8 +192,15 @@ mod inner {
         Ok(())
     }
 
-    pub fn search_dense(conn: &Connection, query_embedding: &[f32], k: u32) -> Result<Vec<(String, f64)>> {
-        let blob: Vec<u8> = query_embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    pub fn search_dense(
+        conn: &Connection,
+        query_embedding: &[f32],
+        k: u32,
+    ) -> Result<Vec<(String, f64)>> {
+        let blob: Vec<u8> = query_embedding
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
 
         let mut stmt = conn.prepare(
             "SELECT content_hash, distance
@@ -184,9 +210,12 @@ mod inner {
              LIMIT ?2",
         )?;
 
-        let results: Vec<(String, f64)> = stmt.query_map(params![blob, k], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-        })?.filter_map(|r| r.ok()).collect();
+        let results: Vec<(String, f64)> = stmt
+            .query_map(params![blob, k], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         Ok(results)
     }
@@ -225,15 +254,17 @@ mod inner {
                AND d.embed_excluded = 0
                AND d.is_binary = 0",
         )?;
-        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> =
-            stmt.query_map([], |row| {
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
                 ))
-            })?.filter_map(|r| r.ok()).collect();
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         for (content_hash, title, summary, topics_json) in &rows {
             let topics: Vec<String> = topics_json
@@ -241,7 +272,8 @@ mod inner {
                 .and_then(|j| serde_json::from_str(j).ok())
                 .unwrap_or_default();
 
-            match embedder.embed_document_text(title.as_deref(), summary.as_deref(), &topics, None) {
+            match embedder.embed_document_text(title.as_deref(), summary.as_deref(), &topics, None)
+            {
                 Ok(embedding) => {
                     store_embedding(conn, content_hash, &embedding, embedder.model_id())?;
                     count += 1;

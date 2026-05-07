@@ -5,9 +5,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use smriti::ignore::{
-    hardened_defaults, parse_smritiignore, IgnoreStack, PathClassification,
-};
+use smriti::ignore::{hardened_defaults, parse_smritiignore, IgnoreStack, PathClassification};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -197,7 +195,10 @@ fn test_classify_path_pipeline() {
     for (rel, is_dir, expected) in cases {
         let path = tmp.path().join(rel);
         let got = stack.classify(&path, *is_dir);
-        assert_eq!(got, *expected, "classify({rel}, {is_dir}) expected {expected:?}, got {got:?}");
+        assert_eq!(
+            got, *expected,
+            "classify({rel}, {is_dir}) expected {expected:?}, got {got:?}"
+        );
     }
 }
 

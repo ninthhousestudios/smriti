@@ -134,9 +134,8 @@ pub fn analyze(conn: &Connection, target_root: &Path) -> Result<BackupAuditRepor
 
     for tf in &target_files {
         let other_copies: Vec<PathBuf> = {
-            let mut rows = other_copies_stmt.query(
-                rusqlite::params![tf.content_hash, target_root_str.as_ref()],
-            )?;
+            let mut rows = other_copies_stmt
+                .query(rusqlite::params![tf.content_hash, target_root_str.as_ref()])?;
             let mut paths = Vec::new();
             while let Some(row) = rows.next()? {
                 let p: String = row.get(0)?;
@@ -248,9 +247,15 @@ pub fn format_audit_file(report: &BackupAuditReport) -> String {
     let mut out = String::new();
 
     let _ = writeln!(out, "# smriti backup-audit — {root_display} — {date}");
-    let _ = writeln!(out, "# Edit the ACTION column. Save and close to see summary.");
+    let _ = writeln!(
+        out,
+        "# Edit the ACTION column. Save and close to see summary."
+    );
     let _ = writeln!(out, "#");
-    let _ = writeln!(out, "# Actions:  redundant = mark for cleanup  |  keep = no change");
+    let _ = writeln!(
+        out,
+        "# Actions:  redundant = mark for cleanup  |  keep = no change"
+    );
     let _ = writeln!(out, "#");
     let _ = writeln!(
         out,

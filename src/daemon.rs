@@ -52,8 +52,7 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
 
     let cancel = CancellationToken::new();
 
-    let http_config = StreamableHttpServerConfig::default()
-        .with_cancellation_token(cancel.clone());
+    let http_config = StreamableHttpServerConfig::default().with_cancellation_token(cancel.clone());
 
     let session_manager = Arc::new(LocalSessionManager::default());
 
@@ -62,7 +61,14 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
     let audit_clone = Arc::clone(&audit_db);
     let cfg_clone = Arc::clone(&cfg);
     let mcp_service = StreamableHttpService::new(
-        move || Ok(SmritiServer::new(Arc::clone(&db_clone), Arc::clone(&enqueue_clone), Arc::clone(&audit_clone), Arc::clone(&cfg_clone))),
+        move || {
+            Ok(SmritiServer::new(
+                Arc::clone(&db_clone),
+                Arc::clone(&enqueue_clone),
+                Arc::clone(&audit_clone),
+                Arc::clone(&cfg_clone),
+            ))
+        },
         session_manager,
         http_config,
     );
@@ -115,7 +121,7 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
 
 #[cfg(unix)]
 async fn shutdown_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
+    use tokio::signal::unix::{signal, SignalKind};
     let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
     let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
     tokio::select! {

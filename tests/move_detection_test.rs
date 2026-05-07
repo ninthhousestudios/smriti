@@ -49,8 +49,17 @@ fn test_update_detection() {
     std::fs::write(root.join("file.txt"), b"modified content with new body").unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let updated: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Updated).collect();
-    assert_eq!(updated.len(), 1, "expected 1 Updated event, got: {:#?}", result.events);
+    let updated: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Updated)
+        .collect();
+    assert_eq!(
+        updated.len(),
+        1,
+        "expected 1 Updated event, got: {:#?}",
+        result.events
+    );
     assert!(updated[0].path.contains("file.txt"));
 }
 
@@ -76,8 +85,17 @@ fn test_minor_change_detection() {
     std::fs::write(root.join("doc.md"), v2).unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let minor: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::MinorChange).collect();
-    assert_eq!(minor.len(), 1, "expected 1 MinorChange event, got: {:#?}", result.events);
+    let minor: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::MinorChange)
+        .collect();
+    assert_eq!(
+        minor.len(),
+        1,
+        "expected 1 MinorChange event, got: {:#?}",
+        result.events
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -99,8 +117,17 @@ fn test_move_detection() {
     std::fs::rename(root.join("original.txt"), root.join("renamed.txt")).unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let moved: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Moved).collect();
-    assert_eq!(moved.len(), 1, "expected 1 Moved event, got: {:#?}", result.events);
+    let moved: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Moved)
+        .collect();
+    assert_eq!(
+        moved.len(),
+        1,
+        "expected 1 Moved event, got: {:#?}",
+        result.events
+    );
     assert!(moved[0].path.contains("renamed.txt"));
 }
 
@@ -124,8 +151,17 @@ fn test_copy_detection() {
     std::fs::copy(root.join("source.txt"), root.join("copy.txt")).unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let copied: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Copied).collect();
-    assert_eq!(copied.len(), 1, "expected 1 Copied event, got: {:#?}", result.events);
+    let copied: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Copied)
+        .collect();
+    assert_eq!(
+        copied.len(),
+        1,
+        "expected 1 Copied event, got: {:#?}",
+        result.events
+    );
     assert!(copied[0].path.contains("copy.txt"));
 }
 
@@ -137,7 +173,11 @@ fn test_hardlink_detection() {
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
-    std::fs::write(root.join("original.txt"), b"unique content for hardlink test").unwrap();
+    std::fs::write(
+        root.join("original.txt"),
+        b"unique content for hardlink test",
+    )
+    .unwrap();
 
     let (config, _db_tmp) = make_config(vec![root.clone()]);
     let mut conn = db::open(&config.db_path).unwrap();
@@ -149,8 +189,17 @@ fn test_hardlink_detection() {
     std::fs::hard_link(root.join("original.txt"), root.join("hardlink.txt")).unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let hardlinked: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Hardlinked).collect();
-    assert_eq!(hardlinked.len(), 1, "expected 1 Hardlinked event, got: {:#?}", result.events);
+    let hardlinked: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Hardlinked)
+        .collect();
+    assert_eq!(
+        hardlinked.len(),
+        1,
+        "expected 1 Hardlinked event, got: {:#?}",
+        result.events
+    );
     assert!(hardlinked[0].path.contains("hardlink.txt"));
 }
 
@@ -178,6 +227,15 @@ fn test_fuzzy_move_plus_edit() {
     std::fs::write(root.join("after.txt"), b"some content A modified").unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let moved: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Moved).collect();
-    assert_eq!(moved.len(), 1, "expected Moved+Updated, got: {:#?}", result.events);
+    let moved: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Moved)
+        .collect();
+    assert_eq!(
+        moved.len(),
+        1,
+        "expected Moved+Updated, got: {:#?}",
+        result.events
+    );
 }

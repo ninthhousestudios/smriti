@@ -89,10 +89,26 @@ fn test_changed_mtime_triggers_rehash() {
     // Short-circuit must miss (mtime changed). Since content hash is same,
     // no Updated event is emitted. No Deleted either.
     let r2 = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let updates: Vec<_> = r2.events.iter().filter(|e| e.event_type == EventType::Updated).collect();
-    let deletes: Vec<_> = r2.events.iter().filter(|e| e.event_type == EventType::Deleted).collect();
-    assert!(updates.is_empty(), "same content should not produce Updated: {:#?}", r2.events);
-    assert!(deletes.is_empty(), "file should not appear deleted: {:#?}", r2.events);
+    let updates: Vec<_> = r2
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Updated)
+        .collect();
+    let deletes: Vec<_> = r2
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Deleted)
+        .collect();
+    assert!(
+        updates.is_empty(),
+        "same content should not produce Updated: {:#?}",
+        r2.events
+    );
+    assert!(
+        deletes.is_empty(),
+        "file should not appear deleted: {:#?}",
+        r2.events
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -114,10 +130,23 @@ fn test_changed_size_triggers_rehash() {
 
     scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    std::fs::write(root.join("growing.txt"), b"short and now much longer content here").unwrap();
+    std::fs::write(
+        root.join("growing.txt"),
+        b"short and now much longer content here",
+    )
+    .unwrap();
 
     let r2 = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let updated: Vec<_> = r2.events.iter().filter(|e| e.event_type == EventType::Updated).collect();
-    assert_eq!(updated.len(), 1, "expected 1 Updated event, got: {:#?}", r2.events);
+    let updated: Vec<_> = r2
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Updated)
+        .collect();
+    assert_eq!(
+        updated.len(),
+        1,
+        "expected 1 Updated event, got: {:#?}",
+        r2.events
+    );
     assert!(updated[0].path.contains("growing.txt"));
 }

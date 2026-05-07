@@ -1,15 +1,15 @@
 pub mod backup;
 pub mod config;
-pub mod db;
 pub mod daemon;
+pub mod db;
 pub mod debounce;
 pub mod embedding;
 pub mod envelope;
 pub mod error;
 pub mod hasher;
 pub mod ignore;
-pub mod metadata;
 pub mod mcp;
+pub mod metadata;
 pub mod privacy;
 pub mod roots;
 pub mod scanner;

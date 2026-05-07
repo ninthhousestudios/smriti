@@ -76,9 +76,7 @@ pub fn extract_metadata(path: &Path, content: &[u8]) -> DocumentMetadata {
     // Binary files: skip all extraction.
     if is_binary(content) {
         return DocumentMetadata {
-            title: path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned()),
+            title: path.file_name().map(|n| n.to_string_lossy().into_owned()),
             summary: None,
             topics: vec![],
             structure: vec![],
@@ -197,18 +195,14 @@ fn extract_markdown_metadata(path: &Path, content: &[u8]) -> DocumentMetadata {
 
 /// Extract metadata from a non-markdown text file.
 fn extract_text_metadata(path: &Path, content: &[u8]) -> DocumentMetadata {
-    let title = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned());
+    let title = path.file_stem().map(|s| s.to_string_lossy().into_owned());
 
-    let summary = std::str::from_utf8(content)
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .map(|l| truncate_to_chars(l, 200))
-        });
+    let summary = std::str::from_utf8(content).ok().and_then(|s| {
+        s.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(|l| truncate_to_chars(l, 200))
+    });
 
     DocumentMetadata {
         title,
@@ -332,14 +326,8 @@ mod tests {
             detect_mime_type(&PathBuf::from("readme.md")),
             "text/markdown"
         );
-        assert_eq!(
-            detect_mime_type(&PathBuf::from("lib.rs")),
-            "text/x-rust"
-        );
-        assert_eq!(
-            detect_mime_type(&PathBuf::from("app.py")),
-            "text/x-python"
-        );
+        assert_eq!(detect_mime_type(&PathBuf::from("lib.rs")), "text/x-rust");
+        assert_eq!(detect_mime_type(&PathBuf::from("app.py")), "text/x-python");
         assert_eq!(
             detect_mime_type(&PathBuf::from("data.json")),
             "application/json"

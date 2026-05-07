@@ -6,7 +6,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use smriti::config::Config;
-use smriti::ignore::{SectionRules, hardened_defaults};
+use smriti::ignore::{hardened_defaults, SectionRules};
 use smriti::search;
 
 fn test_config(tmp: &TempDir) -> Config {
@@ -43,9 +43,17 @@ fn test_full_lifecycle() {
     let root = &config.roots[0].clone();
 
     // Create test files
-    write_file(root, "readme.md", "# My Project\n\nA description of the project.\n\n## Installation\n\nRun the installer.\n");
+    write_file(
+        root,
+        "readme.md",
+        "# My Project\n\nA description of the project.\n\n## Installation\n\nRun the installer.\n",
+    );
     write_file(root, "notes.txt", "some plain text notes here\n");
-    write_file(root, "src/main.rs", "fn main() {\n    println!(\"hello\");\n}\n");
+    write_file(
+        root,
+        "src/main.rs",
+        "fn main() {\n    println!(\"hello\");\n}\n",
+    );
 
     // Init + scan
     let mut conn = smriti::db::open(&config.db_path).unwrap();
@@ -57,16 +65,28 @@ fn test_full_lifecycle() {
 
     // Search via FTS
     let search_result = search::search_fts(&conn, "project", 10, &config).unwrap();
-    assert!(!search_result.results.is_empty(), "FTS search for 'project' should find readme.md");
-    assert_eq!(search_result.results[0].title, Some("My Project".to_string()));
+    assert!(
+        !search_result.results.is_empty(),
+        "FTS search for 'project' should find readme.md"
+    );
+    assert_eq!(
+        search_result.results[0].title,
+        Some("My Project".to_string())
+    );
 
     // Search for content
     let search_result = search::search_fts(&conn, "installer", 10, &config).unwrap();
-    assert!(!search_result.results.is_empty(), "FTS search for 'installer' should find readme.md");
+    assert!(
+        !search_result.results.is_empty(),
+        "FTS search for 'installer' should find readme.md"
+    );
 
     // Search for text file content
     let search_result = search::search_fts(&conn, "plain text notes", 10, &config).unwrap();
-    assert!(!search_result.results.is_empty(), "FTS search should find notes.txt");
+    assert!(
+        !search_result.results.is_empty(),
+        "FTS search should find notes.txt"
+    );
 
     // Get document by hash
     let first_hash = &search_result.results[0].content_hash;
@@ -129,9 +149,19 @@ fn test_history_after_update() {
     let history = search::history(&conn, &doc_path, None, None, &config).unwrap();
     assert!(!history.events.is_empty());
 
-    let event_types: Vec<&str> = history.events.iter().map(|e| e.event_type.as_str()).collect();
-    assert!(event_types.contains(&"created"), "should have a created event");
-    assert!(event_types.contains(&"updated"), "should have an updated event");
+    let event_types: Vec<&str> = history
+        .events
+        .iter()
+        .map(|e| e.event_type.as_str())
+        .collect();
+    assert!(
+        event_types.contains(&"created"),
+        "should have a created event"
+    );
+    assert!(
+        event_types.contains(&"updated"),
+        "should have an updated event"
+    );
 }
 
 #[test]
@@ -154,7 +184,10 @@ fn test_catalog_dirs_in_audit() {
 
     let audit = search::audit(&conn, None, None, &config).unwrap();
     assert_eq!(audit.tier1_total_files, 1, "only important.md is tier 1");
-    assert!(audit.tier2_total_dirs >= 1, "node_modules should be cataloged");
+    assert!(
+        audit.tier2_total_dirs >= 1,
+        "node_modules should be cataloged"
+    );
     assert!(audit.tier2_total_bytes > 0);
 }
 
@@ -197,7 +230,10 @@ fn test_freshness_envelope() {
     smriti::scanner::scan(&mut conn, &config, &global_rules).unwrap();
 
     let result = search::search_fts(&conn, "content", 10, &config).unwrap();
-    assert!(!result.envelope.is_stale, "just scanned — should not be stale");
+    assert!(
+        !result.envelope.is_stale,
+        "just scanned — should not be stale"
+    );
 
     let health = search::health(&conn, &config).unwrap();
     assert!(health.last_scan.is_some());

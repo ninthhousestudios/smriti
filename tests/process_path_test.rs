@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use proptest::prelude::*;
 use smriti::config::Config;
 use smriti::db;
-use smriti::scanner::{
-    self, CurrentEntry, DocInfo, EventType, PrevPathEntry,
-};
+use smriti::scanner::{self, CurrentEntry, DocInfo, EventType, PrevPathEntry};
 use tempfile::TempDir;
 
 fn make_config() -> (Config, TempDir) {
@@ -71,8 +69,8 @@ fn process_path_create_emits_created_event() {
     let (conn, _tmp) = setup_db();
     let entry = make_entry("/tmp/root/a.txt", "hash_a", "body_a");
 
-    let outcome = scanner::process_path(&conn, &entry, None, None, Some(1), "2026-01-01 00:00:00")
-        .unwrap();
+    let outcome =
+        scanner::process_path(&conn, &entry, None, None, Some(1), "2026-01-01 00:00:00").unwrap();
 
     let ev = outcome.event.expect("should emit Created event");
     assert_eq!(ev.event_type, EventType::Created);
@@ -99,9 +97,15 @@ fn process_path_modify_emits_updated_event() {
         size_bytes: 42,
     };
 
-    let outcome =
-        scanner::process_path(&conn, &entry2, Some(&prev), None, Some(1), "2026-01-01 00:00:00")
-            .unwrap();
+    let outcome = scanner::process_path(
+        &conn,
+        &entry2,
+        Some(&prev),
+        None,
+        Some(1),
+        "2026-01-01 00:00:00",
+    )
+    .unwrap();
 
     let ev = outcome.event.expect("should emit Updated event");
     assert_eq!(ev.event_type, EventType::Updated);
@@ -125,11 +129,20 @@ fn process_path_unchanged_returns_none() {
         size_bytes: 42,
     };
 
-    let outcome =
-        scanner::process_path(&conn, &entry, Some(&prev), None, Some(1), "2026-01-01 00:00:00")
-            .unwrap();
+    let outcome = scanner::process_path(
+        &conn,
+        &entry,
+        Some(&prev),
+        None,
+        Some(1),
+        "2026-01-01 00:00:00",
+    )
+    .unwrap();
 
-    assert!(outcome.event.is_none(), "unchanged path should not emit event");
+    assert!(
+        outcome.event.is_none(),
+        "unchanged path should not emit event"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -171,10 +184,16 @@ fn process_path_idempotent() {
         )
         .unwrap();
 
-    assert_eq!(docs_after_first, docs_after_second, "document count should be stable");
+    assert_eq!(
+        docs_after_first, docs_after_second,
+        "document count should be stable"
+    );
     // paths_after_second may have one more row (the disappear+reinsert cycle),
     // but the active (non-disappeared) count should be 1
-    assert_eq!(paths_after_second, 1, "should have exactly one active path row");
+    assert_eq!(
+        paths_after_second, 1,
+        "should have exactly one active path row"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -207,11 +226,20 @@ fn process_path_short_circuited_updates_scan_id() {
     )
     .unwrap();
 
-    let outcome =
-        scanner::process_path(&conn, &entry2, Some(&prev), None, Some(2), "2026-01-01 00:01:00")
-            .unwrap();
+    let outcome = scanner::process_path(
+        &conn,
+        &entry2,
+        Some(&prev),
+        None,
+        Some(2),
+        "2026-01-01 00:01:00",
+    )
+    .unwrap();
 
-    assert!(outcome.event.is_none(), "short-circuited path should not emit event");
+    assert!(
+        outcome.event.is_none(),
+        "short-circuited path should not emit event"
+    );
 
     let last_seen: i64 = conn
         .query_row(

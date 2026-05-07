@@ -50,8 +50,17 @@ fn test_batched_new_files() {
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    let created: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Created).collect();
-    assert_eq!(created.len(), 5, "expected 5 Created events, got: {:#?}", result.events);
+    let created: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Created)
+        .collect();
+    assert_eq!(
+        created.len(),
+        5,
+        "expected 5 Created events, got: {:#?}",
+        result.events
+    );
 
     // scan_runs should show complete
     let status = scanner::scan_status(&conn).unwrap().expect("scan_runs row");
@@ -64,7 +73,6 @@ fn test_batched_new_files() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_deleted_files() {
-
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -80,8 +88,17 @@ fn test_batched_deleted_files() {
     std::fs::remove_file(root.join("ephemeral.txt")).unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let deleted: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Deleted).collect();
-    assert_eq!(deleted.len(), 1, "expected 1 Deleted event, got: {:#?}", result.events);
+    let deleted: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Deleted)
+        .collect();
+    assert_eq!(
+        deleted.len(),
+        1,
+        "expected 1 Deleted event, got: {:#?}",
+        result.events
+    );
     assert!(deleted[0].path.contains("ephemeral.txt"));
 }
 
@@ -90,7 +107,6 @@ fn test_batched_deleted_files() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_mid_scan_visibility() {
-
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -106,18 +122,26 @@ fn test_batched_mid_scan_visibility() {
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
     // All 7 files should be indexed
-    let created: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Created).collect();
+    let created: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Created)
+        .collect();
     assert_eq!(created.len(), 7);
 
     // Documents and paths should all be present
-    let doc_count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0)).unwrap();
+    let doc_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(doc_count, 7);
 
-    let path_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL",
-        [],
-        |r| r.get(0),
-    ).unwrap();
+    let path_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(path_count, 7);
 }
 
@@ -126,7 +150,6 @@ fn test_batched_mid_scan_visibility() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_move_detection() {
-
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -142,16 +165,27 @@ fn test_batched_move_detection() {
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    let moved: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Moved).collect();
-    assert_eq!(moved.len(), 1, "expected 1 Moved event, got: {:#?}", result.events);
+    let moved: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Moved)
+        .collect();
+    assert_eq!(
+        moved.len(),
+        1,
+        "expected 1 Moved event, got: {:#?}",
+        result.events
+    );
     assert!(moved[0].path.contains("renamed.txt"));
 
     // The moved event should also be persisted in the DB
-    let db_moved: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE event_type = 'moved'",
-        [],
-        |r| r.get(0),
-    ).unwrap();
+    let db_moved: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE event_type = 'moved'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert!(db_moved >= 1);
 }
 
@@ -160,7 +194,6 @@ fn test_batched_move_detection() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_rerun_after_normal_scan() {
-
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -177,7 +210,11 @@ fn test_batched_rerun_after_normal_scan() {
 
     // Second scan without changes — no new events
     let r2 = scanner::scan(&mut conn, &config, &rules).unwrap();
-    assert_eq!(r2.tier1.total, 0, "second scan should produce no events: {:#?}", r2.events);
+    assert_eq!(
+        r2.tier1.total, 0,
+        "second scan should produce no events: {:#?}",
+        r2.events
+    );
 
     // Add a file and re-scan
     std::fs::write(root.join("c.txt"), b"charlie").unwrap();
@@ -190,7 +227,6 @@ fn test_batched_rerun_after_normal_scan() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_scan_runs_recorded() {
-
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -203,14 +239,18 @@ fn test_batched_scan_runs_recorded() {
     scanner::scan(&mut conn, &config, &rules).unwrap();
     scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM scan_runs", [], |r| r.get(0)).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM scan_runs", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(count, 2, "expected 2 scan_runs rows");
 
-    let all_complete: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM scan_runs WHERE status = 'complete'",
-        [],
-        |r| r.get(0),
-    ).unwrap();
+    let all_complete: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM scan_runs WHERE status = 'complete'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(all_complete, 2);
 }
 
@@ -219,7 +259,6 @@ fn test_batched_scan_runs_recorded() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_batched_update_detection() {
-
     let root_tmp = TempDir::new().unwrap();
     let root = root_tmp.path().to_path_buf();
 
@@ -236,6 +275,15 @@ fn test_batched_update_detection() {
     std::fs::write(root.join("doc.txt"), b"version 2").unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let updated: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Updated).collect();
-    assert_eq!(updated.len(), 1, "expected 1 Updated event, got: {:#?}", result.events);
+    let updated: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Updated)
+        .collect();
+    assert_eq!(
+        updated.len(),
+        1,
+        "expected 1 Updated event, got: {:#?}",
+        result.events
+    );
 }
