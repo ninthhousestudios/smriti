@@ -90,7 +90,10 @@ fn watcher_create_modify_delete_lifecycle() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_ne!(initial_hash, new_hash, "content_hash should change after modify");
+        assert_ne!(
+            initial_hash, new_hash,
+            "content_hash should change after modify"
+        );
     }
 
     // --- DELETE ---
@@ -149,7 +152,10 @@ fn watcher_indexes_new_directory_children() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(count >= 2, "should have indexed at least 2 files in new directory, got {count}");
+    assert!(
+        count >= 2,
+        "should have indexed at least 2 files in new directory, got {count}"
+    );
 }
 
 #[test]
@@ -202,7 +208,10 @@ fn watcher_rename_within_root() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(old_active, 0, "old path should be marked disappeared after rename");
+    assert_eq!(
+        old_active, 0,
+        "old path should be marked disappeared after rename"
+    );
 
     let new_hash: String = conn
         .query_row(
@@ -211,7 +220,10 @@ fn watcher_rename_within_root() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(hash_before, new_hash, "content_hash should be preserved across rename");
+    assert_eq!(
+        hash_before, new_hash,
+        "content_hash should be preserved across rename"
+    );
 }
 
 #[test]
@@ -266,7 +278,10 @@ fn watcher_move_out_of_root_is_delete() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(active, 0, "file moved out of root should be marked disappeared");
+    assert_eq!(
+        active, 0,
+        "file moved out of root should be marked disappeared"
+    );
 }
 
 #[test]
@@ -370,7 +385,10 @@ fn watcher_startup_scan_indexes_preexisting_files() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, 3, "startup scan should index all 3 pre-existing files");
+    assert_eq!(
+        count, 3,
+        "startup scan should index all 3 pre-existing files"
+    );
 
     let state: String = conn
         .query_row(
@@ -379,7 +397,10 @@ fn watcher_startup_scan_indexes_preexisting_files() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(state, "stopped", "heartbeat should be 'stopped' after shutdown");
+    assert_eq!(
+        state, "stopped",
+        "heartbeat should be 'stopped' after shutdown"
+    );
 }
 
 #[test]
@@ -423,7 +444,10 @@ fn watcher_crash_recovery_marks_running_scans_failed() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(crashed, 2, "both stale running scans should be marked as failed");
+    assert_eq!(
+        crashed, 2,
+        "both stale running scans should be marked as failed"
+    );
 }
 
 #[test]
@@ -434,7 +458,11 @@ fn watcher_heartbeat_reflects_scanning_then_watching() {
 
     // Add some files so the scan takes a moment
     for i in 0..10 {
-        std::fs::write(root.path().join(format!("file{i}.txt")), format!("content {i}")).unwrap();
+        std::fs::write(
+            root.path().join(format!("file{i}.txt")),
+            format!("content {i}"),
+        )
+        .unwrap();
     }
 
     let _conn = db::open(&config.db_path).unwrap();
@@ -454,9 +482,16 @@ fn watcher_heartbeat_reflects_scanning_then_watching() {
     {
         let conn = db::open_readonly(&config.db_path).unwrap();
         let state: String = conn
-            .query_row("SELECT state FROM watcher_heartbeat WHERE id = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT state FROM watcher_heartbeat WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(state, "watching", "should be in watching state after startup scan");
+        assert_eq!(
+            state, "watching",
+            "should be in watching state after startup scan"
+        );
 
         let last_scan: Option<String> = conn
             .query_row(
@@ -465,7 +500,10 @@ fn watcher_heartbeat_reflects_scanning_then_watching() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(last_scan.is_some(), "last_full_scan_at should be set after startup scan");
+        assert!(
+            last_scan.is_some(),
+            "last_full_scan_at should be set after startup scan"
+        );
     }
 
     shutdown.store(true, Ordering::SeqCst);
@@ -559,9 +597,16 @@ fn watcher_graceful_shutdown_drains_pending_events() {
     assert_eq!(count, 1, "graceful shutdown should drain pending events");
 
     let state: String = conn
-        .query_row("SELECT state FROM watcher_heartbeat WHERE id = 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT state FROM watcher_heartbeat WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(state, "stopped", "heartbeat should be 'stopped' after graceful shutdown");
+    assert_eq!(
+        state, "stopped",
+        "heartbeat should be 'stopped' after graceful shutdown"
+    );
 }
 
 #[test]
@@ -593,7 +638,10 @@ fn watcher_shutdown_aborts_running_scan_runs() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(running_count, 0, "no scan_runs should remain running after shutdown");
+    assert_eq!(
+        running_count, 0,
+        "no scan_runs should remain running after shutdown"
+    );
 
     let complete_count: i64 = conn
         .query_row(
@@ -603,4 +651,62 @@ fn watcher_shutdown_aborts_running_scan_runs() {
         )
         .unwrap();
     assert!(complete_count >= 1, "startup scan should have completed");
+}
+
+#[test]
+fn watcher_crash_recovery_marks_running_scan_requests_failed() {
+    let db_dir = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let config = make_config(&db_dir, &root);
+
+    // Insert two stuck-running scan_requests as if a previous watcher crashed
+    // mid-scan. The new watcher must reset them on startup.
+    {
+        let conn = db::open(&config.db_path).unwrap();
+        conn.execute(
+            "INSERT INTO scan_requests (requested_at, kind, status, started_at)
+             VALUES ('2026-01-01 00:00:00', 'full', 'running', '2026-01-01 00:00:01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_requests (requested_at, kind, status, started_at)
+             VALUES ('2026-01-01 01:00:00', 'path', 'running', '2026-01-01 01:00:01')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        watcher::run_watch_with_shutdown(&config_clone, &shutdown_clone)
+    });
+
+    std::thread::sleep(Duration::from_millis(2000));
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = handle.join();
+
+    let conn = db::open_readonly(&config.db_path).unwrap();
+    let recovered: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM scan_requests WHERE status = 'failed' AND error = 'watcher restarted'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        recovered, 2,
+        "both stale running scan_requests should be marked as failed on startup"
+    );
+    let still_running: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM scan_requests WHERE status = 'running'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still_running, 0, "no scan_requests should remain running");
 }

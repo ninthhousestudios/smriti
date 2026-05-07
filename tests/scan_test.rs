@@ -52,8 +52,17 @@ fn test_scan_new_files() {
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    let created: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Created).collect();
-    assert_eq!(created.len(), 2, "expected 2 Created events, got: {:#?}", result.events);
+    let created: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Created)
+        .collect();
+    assert_eq!(
+        created.len(),
+        2,
+        "expected 2 Created events, got: {:#?}",
+        result.events
+    );
     assert_eq!(result.tier1.created, 2);
 
     for e in &created {
@@ -82,8 +91,17 @@ fn test_scan_deleted_files() {
     std::fs::remove_file(root.join("ephemeral.txt")).unwrap();
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
-    let deleted: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Deleted).collect();
-    assert_eq!(deleted.len(), 1, "expected 1 Deleted event, got: {:#?}", result.events);
+    let deleted: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Deleted)
+        .collect();
+    assert_eq!(
+        deleted.len(),
+        1,
+        "expected 1 Deleted event, got: {:#?}",
+        result.events
+    );
     assert!(deleted[0].path.contains("ephemeral.txt"));
 }
 
@@ -107,13 +125,18 @@ fn test_catalog_dir_tracking() {
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    assert!(result.tier2.cataloged >= 1, "expected at least 1 cataloged dir");
+    assert!(
+        result.tier2.cataloged >= 1,
+        "expected at least 1 cataloged dir"
+    );
 
-    let (total_bytes, file_count): (i64, i64) = conn.query_row(
-        "SELECT total_bytes, file_count FROM catalog WHERE path LIKE '%node_modules%'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).expect("catalog row should exist");
+    let (total_bytes, file_count): (i64, i64) = conn
+        .query_row(
+            "SELECT total_bytes, file_count FROM catalog WHERE path LIKE '%node_modules%'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("catalog row should exist");
 
     assert_eq!(file_count, 2, "node_modules should have 2 files");
     assert!(total_bytes > 0, "total_bytes should be > 0");
@@ -139,10 +162,16 @@ fn test_symlink_not_followed() {
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    let symlink_events: Vec<_> = result.events.iter()
+    let symlink_events: Vec<_> = result
+        .events
+        .iter()
         .filter(|e| e.path.contains("link_to_secret"))
         .collect();
-    assert!(symlink_events.is_empty(), "symlink should not produce events: {:#?}", symlink_events);
+    assert!(
+        symlink_events.is_empty(),
+        "symlink should not produce events: {:#?}",
+        symlink_events
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +190,9 @@ fn test_event_carries_extension() {
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    let ev = result.events.iter()
+    let ev = result
+        .events
+        .iter()
         .find(|e| e.path.contains("readme.md"))
         .expect("event for readme.md should exist");
 
@@ -187,7 +218,11 @@ fn test_nonexistent_root_skipped() {
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    let created: Vec<_> = result.events.iter().filter(|e| e.event_type == EventType::Created).collect();
+    let created: Vec<_> = result
+        .events
+        .iter()
+        .filter(|e| e.event_type == EventType::Created)
+        .collect();
     assert_eq!(created.len(), 1);
     assert!(created[0].path.contains("real.txt"));
 }
@@ -211,16 +246,112 @@ fn test_large_file_skips_metadata() {
 
     let result = scanner::scan(&mut conn, &config, &rules).unwrap();
 
-    let ev = result.events.iter()
+    let ev = result
+        .events
+        .iter()
         .find(|e| e.path.contains("large.md"))
         .expect("should have event for large.md");
     assert_eq!(ev.event_type, EventType::Created);
 
-    let is_binary: bool = conn.query_row(
-        "SELECT is_binary FROM documents WHERE content_hash = ?1",
-        [&ev.content_hash],
-        |row| row.get(0),
-    ).expect("document row should exist");
+    let is_binary: bool = conn
+        .query_row(
+            "SELECT is_binary FROM documents WHERE content_hash = ?1",
+            [&ev.content_hash],
+            |row| row.get(0),
+        )
+        .expect("document row should exist");
 
     assert!(is_binary, "large file should have is_binary=true");
+}
+
+// ---------------------------------------------------------------------------
+// test_scan_with_heartbeat_invokes_callback
+//
+// The scanner must tick a heartbeat callback at batch boundaries during long
+// scans, so the watcher's heartbeat doesn't age past the staleness threshold
+// while a scan is in flight. This test forces multiple batches via a tiny
+// scan_batch_size and asserts the callback is invoked at least once per batch
+// boundary in the hash and DB-commit phases.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_scan_with_heartbeat_invokes_callback() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root_tmp = TempDir::new().unwrap();
+    let root = root_tmp.path().to_path_buf();
+    for i in 0..10 {
+        std::fs::write(root.join(format!("file{i}.txt")), format!("content {i}")).unwrap();
+    }
+
+    let (mut config, _db_tmp) = make_config(vec![root.clone()]);
+    config.scan_batch_size = 2; // forces 5 hash chunks + 5 commit batches
+    let mut conn = db::open(&config.db_path).unwrap();
+    let rules = empty_rules(&root);
+
+    let count = AtomicUsize::new(0);
+    let tick = |_: &rusqlite::Connection| {
+        count.fetch_add(1, Ordering::SeqCst);
+    };
+
+    scanner::scan_with_heartbeat(&mut conn, &config, &rules, Some(&tick)).unwrap();
+
+    let n = count.load(Ordering::SeqCst);
+    // Expect: 1 post-walk + 5 hash chunks + 5 commit batches = 11.
+    // Allow some slack in case future tick points are added or removed.
+    assert!(
+        n >= 5,
+        "heartbeat callback should fire at multiple batch boundaries; got {n}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_scan_with_heartbeat_writes_to_db
+//
+// End-to-end check: when the watcher's tick closure writes to
+// watcher_heartbeat.updated_at, that value advances during a scan even with
+// scan_batch_size=1 (worst case for tick frequency).
+// ---------------------------------------------------------------------------
+#[test]
+fn test_scan_with_heartbeat_writes_to_db() {
+    let root_tmp = TempDir::new().unwrap();
+    let root = root_tmp.path().to_path_buf();
+    for i in 0..5 {
+        std::fs::write(root.join(format!("file{i}.txt")), format!("c{i}")).unwrap();
+    }
+
+    let (mut config, _db_tmp) = make_config(vec![root.clone()]);
+    config.scan_batch_size = 1;
+    let mut conn = db::open(&config.db_path).unwrap();
+    let rules = empty_rules(&root);
+
+    // Seed a heartbeat row with a stale updated_at the scan must overwrite.
+    conn.execute(
+        "INSERT INTO watcher_heartbeat (id, pid, started_at, updated_at, state)
+         VALUES (1, 0, '2020-01-01 00:00:00', '2020-01-01 00:00:00', 'starting')",
+        [],
+    )
+    .unwrap();
+
+    let tick = |c: &rusqlite::Connection| {
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        c.execute(
+            "UPDATE watcher_heartbeat SET updated_at = ?1 WHERE id = 1",
+            rusqlite::params![now],
+        )
+        .ok();
+    };
+
+    scanner::scan_with_heartbeat(&mut conn, &config, &rules, Some(&tick)).unwrap();
+
+    let updated_at: String = conn
+        .query_row(
+            "SELECT updated_at FROM watcher_heartbeat WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(
+        updated_at, "2020-01-01 00:00:00",
+        "heartbeat updated_at should advance during scan"
+    );
 }

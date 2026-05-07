@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
-use rusqlite::{Connection, ffi::sqlite3_auto_extension};
+use rusqlite::{ffi::sqlite3_auto_extension, Connection};
 
 use crate::error::{Result, SmritiError};
 
@@ -28,9 +28,7 @@ fn open_connection(path: &Path) -> Result<Connection> {
                 *mut *const i8,
                 *const rusqlite::ffi::sqlite3_api_routines,
             ) -> i32,
-        >(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
+        >(sqlite_vec::sqlite3_vec_init as *const ())));
     }
 
     let conn = if path.as_os_str() == ":memory:" {
@@ -102,9 +100,10 @@ fn set_pragma(conn: &Connection, name: &str, value: &str) -> Result<()> {
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let sql = include_str!("../migrations/0001_initial.sql");
-    conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
-        message: e.to_string(),
-    })?;
+    conn.execute_batch(sql)
+        .map_err(|e| SmritiError::Migration {
+            message: e.to_string(),
+        })?;
 
     // 0002: scan generations — ALTER TABLE ADD COLUMN is not idempotent,
     // so check whether the column exists before running the migration.
@@ -113,9 +112,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         .is_ok();
     if !has_last_seen {
         let sql = include_str!("../migrations/0002_scan_generations.sql");
-        conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
-            message: format!("0002_scan_generations: {e}"),
-        })?;
+        conn.execute_batch(sql)
+            .map_err(|e| SmritiError::Migration {
+                message: format!("0002_scan_generations: {e}"),
+            })?;
     } else {
         // Columns exist; still ensure the table and indexes are present
         // (CREATE TABLE/INDEX IF NOT EXISTS are idempotent).
@@ -139,9 +139,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     // 0003: watcher tables — all CREATE TABLE/INDEX IF NOT EXISTS, inherently idempotent.
     let sql = include_str!("../migrations/0003_watcher_tables.sql");
-    conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
-        message: format!("0003_watcher_tables: {e}"),
-    })?;
+    conn.execute_batch(sql)
+        .map_err(|e| SmritiError::Migration {
+            message: format!("0003_watcher_tables: {e}"),
+        })?;
 
     // 0005: add 'stopping' and 'reconciling' states to watcher_heartbeat.
     let has_new_states: bool = conn
@@ -154,20 +155,20 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         .unwrap_or(false);
     if !has_new_states {
         let sql = include_str!("../migrations/0005_heartbeat_states.sql");
-        conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
-            message: format!("0005_heartbeat_states: {e}"),
-        })?;
+        conn.execute_batch(sql)
+            .map_err(|e| SmritiError::Migration {
+                message: format!("0005_heartbeat_states: {e}"),
+            })?;
     }
 
     // 0004: drop read_audit from index.db (moved to audit.db).
-    let has_read_audit: bool = conn
-        .prepare("SELECT 1 FROM read_audit LIMIT 0")
-        .is_ok();
+    let has_read_audit: bool = conn.prepare("SELECT 1 FROM read_audit LIMIT 0").is_ok();
     if has_read_audit {
         let sql = include_str!("../migrations/0004_drop_read_audit.sql");
-        conn.execute_batch(sql).map_err(|e| SmritiError::Migration {
-            message: format!("0004_drop_read_audit: {e}"),
-        })?;
+        conn.execute_batch(sql)
+            .map_err(|e| SmritiError::Migration {
+                message: format!("0004_drop_read_audit: {e}"),
+            })?;
     }
 
     Ok(())
@@ -247,20 +248,24 @@ pub struct ScanRequestStatus {
 
 pub fn claim_pending_scan(conn: &Connection) -> Result<Option<ScanRequest>> {
     let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let updated = conn.execute(
-        "UPDATE scan_requests SET status = 'running', started_at = ?1
-         WHERE id = (SELECT id FROM scan_requests WHERE status = 'pending' ORDER BY requested_at LIMIT 1)",
-        rusqlite::params![now_str],
-    )?;
-    if updated == 0 {
-        return Ok(None);
-    }
     let row = conn.query_row(
-        "SELECT id, kind, root FROM scan_requests WHERE status = 'running' ORDER BY started_at DESC LIMIT 1",
-        [],
-        |r| Ok(ScanRequest { id: r.get(0)?, kind: r.get(1)?, root: r.get(2)? }),
-    )?;
-    Ok(Some(row))
+        "UPDATE scan_requests SET status = 'running', started_at = ?1
+         WHERE id = (SELECT id FROM scan_requests WHERE status = 'pending' ORDER BY requested_at LIMIT 1)
+         RETURNING id, kind, root",
+        rusqlite::params![now_str],
+        |r| {
+            Ok(ScanRequest {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                root: r.get(2)?,
+            })
+        },
+    );
+    match row {
+        Ok(req) => Ok(Some(req)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(SmritiError::Db(e)),
+    }
 }
 
 pub fn complete_scan_request(conn: &Connection, id: i64, scan_run_id: Option<i64>) -> Result<()> {
@@ -308,7 +313,9 @@ pub fn poll_scan_request(conn: &Connection, id: i64) -> Result<Option<ScanReques
 pub fn watcher_holds_lock(db_path: &Path) -> bool {
     use std::os::unix::io::AsRawFd;
     let lock_path = writer_lock_path(db_path);
-    let Ok(file) = File::open(&lock_path) else { return false };
+    let Ok(file) = File::open(&lock_path) else {
+        return false;
+    };
     let fd = file.as_raw_fd();
     let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if ret != 0 {

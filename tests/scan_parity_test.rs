@@ -31,7 +31,6 @@ fn make_config(db_dir: &TempDir, roots: Vec<PathBuf>) -> Config {
     }
 }
 
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct PathRecord {
     content_hash: String,
@@ -111,7 +110,6 @@ fn build_test_tree(root: &std::path::Path) {
 }
 
 #[test]
-#[ignore]
 fn scan_and_watcher_produce_identical_state() {
     // --- Build shared filesystem tree ---
     let tree = TempDir::new().unwrap();
@@ -212,7 +210,6 @@ fn scan_and_watcher_produce_identical_state() {
 }
 
 #[test]
-#[ignore]
 fn scan_and_watcher_agree_on_ignored_files() {
     let tree = TempDir::new().unwrap();
     let root = tree.path().to_path_buf();
@@ -269,7 +266,7 @@ fn scan_and_watcher_agree_on_ignored_files() {
         watcher_paths.len()
     );
 
-    for (path, _) in &batch_paths {
+    for path in batch_paths.keys() {
         assert!(
             !path.contains(".git") && !path.contains("node_modules"),
             "ignored path leaked through: {path}"

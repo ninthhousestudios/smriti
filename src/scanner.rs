@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use rayon::prelude::*;
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{params, Connection, OptionalExtension as _};
 use walkdir::WalkDir;
 
 use crate::config::Config;
@@ -110,7 +110,9 @@ pub struct DocInfo {
 
 impl std::fmt::Debug for DocInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DocInfo").field("title", &self.title).finish_non_exhaustive()
+        f.debug_struct("DocInfo")
+            .field("title", &self.title)
+            .finish_non_exhaustive()
     }
 }
 
@@ -245,7 +247,8 @@ pub fn process_path(
                 conn.prepare_cached(
                     "INSERT INTO document_fts (rowid, title, topics, summary, content)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                )?.execute(params![
+                )?
+                .execute(params![
                     rowid,
                     info.title.as_deref().unwrap_or(""),
                     info.topics_json,
@@ -256,7 +259,8 @@ pub fn process_path(
         } else if !entry.body_hash.is_empty() && entry.body_hash != entry.content_hash {
             conn.prepare_cached(
                 "UPDATE documents SET body_hash = ?1 WHERE content_hash = ?2 AND body_hash IS NULL",
-            )?.execute(params![entry.body_hash, entry.content_hash])?;
+            )?
+            .execute(params![entry.body_hash, entry.content_hash])?;
         }
     }
 
@@ -264,11 +268,13 @@ pub fn process_path(
     if entry.short_circuited {
         conn.prepare_cached(
             "UPDATE paths SET last_seen_scan = ?1 WHERE path = ?2 AND disappeared IS NULL",
-        )?.execute(params![scan_id, path_str.as_ref()])?;
+        )?
+        .execute(params![scan_id, path_str.as_ref()])?;
     } else {
         conn.prepare_cached(
             "UPDATE paths SET disappeared = ?1 WHERE path = ?2 AND disappeared IS NULL",
-        )?.execute(params![now_str, path_str.as_ref()])?;
+        )?
+        .execute(params![now_str, path_str.as_ref()])?;
         conn.prepare_cached(
             "INSERT OR REPLACE INTO paths (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -370,9 +376,7 @@ pub fn walk_roots(
         let mut ignore_stack = IgnoreStack::new(global_layer);
         let mut dir_depth_stack: Vec<usize> = Vec::new();
 
-        let walker = WalkDir::new(root)
-            .follow_links(false)
-            .sort_by_file_name();
+        let walker = WalkDir::new(root).follow_links(false).sort_by_file_name();
 
         for entry_result in walker {
             let entry = match entry_result {
@@ -387,12 +391,18 @@ pub fn walk_roots(
             let is_dir = entry.file_type().is_dir();
             let depth = entry.depth();
 
-            if skip_subtrees.iter().any(|s| path.starts_with(s) && path != s) {
+            if skip_subtrees
+                .iter()
+                .any(|s| path.starts_with(s) && path != s)
+            {
                 continue;
             }
-            skip_subtrees.retain(|s| path.starts_with(s) || !s.starts_with(path.parent().unwrap_or(path)));
+            skip_subtrees
+                .retain(|s| path.starts_with(s) || !s.starts_with(path.parent().unwrap_or(path)));
 
-            while dir_depth_stack.last().copied().unwrap_or(0) >= depth && !dir_depth_stack.is_empty() {
+            while dir_depth_stack.last().copied().unwrap_or(0) >= depth
+                && !dir_depth_stack.is_empty()
+            {
                 dir_depth_stack.pop();
                 ignore_stack.pop();
             }
@@ -427,8 +437,10 @@ pub fn walk_roots(
                     continue;
                 }
 
-                classification @ (PathClassification::Indexed | PathClassification::IndexedNoEmbed) => {
-                    let embed_excluded = matches!(classification, PathClassification::IndexedNoEmbed);
+                classification @ (PathClassification::Indexed
+                | PathClassification::IndexedNoEmbed) => {
+                    let embed_excluded =
+                        matches!(classification, PathClassification::IndexedNoEmbed);
 
                     if is_dir {
                         continue;
@@ -456,16 +468,15 @@ pub fn walk_roots(
 
                     seen_paths.insert(path.to_path_buf());
 
-                    let (needs_hash, prev_hash) =
-                        if let Some(prev) = prev_paths.get(path) {
-                            if prev.mtime == mtime && prev.size_bytes == size_bytes {
-                                (false, Some(prev.content_hash.clone()))
-                            } else {
-                                (true, None)
-                            }
+                    let (needs_hash, prev_hash) = if let Some(prev) = prev_paths.get(path) {
+                        if prev.mtime == mtime && prev.size_bytes == size_bytes {
+                            (false, Some(prev.content_hash.clone()))
                         } else {
                             (true, None)
-                        };
+                        }
+                    } else {
+                        (true, None)
+                    };
 
                     entries.push(WalkEntry {
                         path: path.to_path_buf(),
@@ -483,7 +494,11 @@ pub fn walk_roots(
         }
     }
 
-    Ok(WalkResult { entries, seen_paths, catalog_dirs })
+    Ok(WalkResult {
+        entries,
+        seen_paths,
+        catalog_dirs,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +509,19 @@ pub fn scan(
     conn: &mut Connection,
     config: &Config,
     global_rules: &SectionRules,
+) -> Result<ScanResult> {
+    scan_with_heartbeat(conn, config, global_rules, None)
+}
+
+/// Scan with an optional heartbeat tick. The watcher passes a closure that
+/// bumps `watcher_heartbeat.updated_at`; the closure runs at each batch
+/// boundary in the hash and DB-commit phases so a long scan doesn't make
+/// the watcher look stale to serve.
+pub fn scan_with_heartbeat(
+    conn: &mut Connection,
+    config: &Config,
+    global_rules: &SectionRules,
+    heartbeat: Option<&dyn Fn(&Connection)>,
 ) -> Result<ScanResult> {
     let start = Instant::now();
     let now = Utc::now();
@@ -507,11 +535,7 @@ pub fn scan(
         "INSERT INTO scan_runs (started_at, status) VALUES (?1, 'running')",
         params![now_str],
     )?;
-    let scan_id: i64 = conn.query_row(
-        "SELECT last_insert_rowid()",
-        [],
-        |row| row.get(0),
-    )?;
+    let scan_id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |row| row.get(0))?;
     tracing::info!("scan {scan_id} started, batch_size={batch_size}");
 
     // 2. Load previous state
@@ -543,7 +567,11 @@ pub fn scan(
             return Err(e);
         }
     };
-    let WalkResult { entries: walk_entries, seen_paths, catalog_dirs } = walk_data;
+    let WalkResult {
+        entries: walk_entries,
+        seen_paths,
+        catalog_dirs,
+    } = walk_data;
 
     let walk_elapsed = start.elapsed();
     let needs_hash_count = walk_entries.iter().filter(|e| e.needs_hash).count();
@@ -553,77 +581,97 @@ pub fn scan(
         needs_hash_count,
         walk_elapsed.as_secs_f64(),
     );
+    if let Some(tick) = heartbeat {
+        tick(conn);
+    }
 
-    // 4. Hash + metadata phase: parallel via rayon
+    // 4. Hash + metadata phase: parallel via rayon, in chunks so the watcher
+    //    heartbeat can tick between chunks (rayon blocks the main thread for
+    //    the duration of each par_iter call).
     let fts_max = config.fts_content_max_bytes as usize;
     type HashResult = Option<(usize, String, String, Option<DocInfo>)>;
-    let hash_results: Vec<HashResult> = walk_entries
-        .par_iter()
-        .enumerate()
-        .filter_map(|(idx, entry)| {
-            if !entry.needs_hash {
-                return None;
-            }
-            if entry.is_large {
-                Some(match hasher::hash_file(&entry.path) {
-                    Ok(content_hash) => {
-                        let doc_info = DocInfo {
-                            title: None,
-                            summary: None,
-                            topics_json: "[]".to_string(),
-                            structure_json: "[]".to_string(),
-                            is_binary: true,
-                            fts_content: None,
-                        };
-                        Some((idx, content_hash.clone(), content_hash, Some(doc_info)))
-                    }
-                    Err(e) => {
-                        tracing::warn!("cannot hash {}: {}", entry.path.display(), e);
-                        None
-                    }
-                })
-            } else {
-                Some(match std::fs::read(&entry.path) {
-                    Ok(content) => {
-                        let content_hash = hasher::hash_content(&content);
-                        let body_hash = hasher::hash_body(&content);
-                        let meta = metadata::extract_metadata(&entry.path, &content);
-                        let topics_json = serde_json::to_string(&meta.topics)
-                            .unwrap_or_else(|_| "[]".to_string());
-                        let structure_json = serde_json::to_string(
-                            &meta.structure.iter().map(|s| {
-                                serde_json::json!({
-                                    "heading": s.heading,
-                                    "level": s.level,
-                                    "line": s.line,
-                                })
-                            }).collect::<Vec<_>>()
-                        ).unwrap_or_else(|_| "[]".to_string());
-                        let fts_content = if !meta.is_binary {
-                            std::str::from_utf8(&content)
-                                .ok()
-                                .map(|s| truncate_to_char_boundary(s, fts_max).to_string())
-                        } else {
+    let hash_chunk_size = batch_size.max(1);
+    let mut hash_results: Vec<HashResult> = Vec::with_capacity(walk_entries.len());
+    for (chunk_idx, chunk) in walk_entries.chunks(hash_chunk_size).enumerate() {
+        let base = chunk_idx * hash_chunk_size;
+        let chunk_results: Vec<HashResult> = chunk
+            .par_iter()
+            .enumerate()
+            .filter_map(|(local_idx, entry)| {
+                if !entry.needs_hash {
+                    return None;
+                }
+                let idx = base + local_idx;
+                if entry.is_large {
+                    Some(match hasher::hash_file(&entry.path) {
+                        Ok(content_hash) => {
+                            let doc_info = DocInfo {
+                                title: None,
+                                summary: None,
+                                topics_json: "[]".to_string(),
+                                structure_json: "[]".to_string(),
+                                is_binary: true,
+                                fts_content: None,
+                            };
+                            Some((idx, content_hash.clone(), content_hash, Some(doc_info)))
+                        }
+                        Err(e) => {
+                            tracing::warn!("cannot hash {}: {}", entry.path.display(), e);
                             None
-                        };
-                        let doc_info = DocInfo {
-                            title: meta.title,
-                            summary: meta.summary,
-                            topics_json,
-                            structure_json,
-                            is_binary: meta.is_binary,
-                            fts_content,
-                        };
-                        Some((idx, content_hash, body_hash, Some(doc_info)))
-                    }
-                    Err(e) => {
-                        tracing::warn!("cannot read {}: {}", entry.path.display(), e);
-                        None
-                    }
-                })
-            }
-        })
-        .collect();
+                        }
+                    })
+                } else {
+                    Some(match std::fs::read(&entry.path) {
+                        Ok(content) => {
+                            let content_hash = hasher::hash_content(&content);
+                            let body_hash = hasher::hash_body(&content);
+                            let meta = metadata::extract_metadata(&entry.path, &content);
+                            let topics_json = serde_json::to_string(&meta.topics)
+                                .unwrap_or_else(|_| "[]".to_string());
+                            let structure_json = serde_json::to_string(
+                                &meta
+                                    .structure
+                                    .iter()
+                                    .map(|s| {
+                                        serde_json::json!({
+                                            "heading": s.heading,
+                                            "level": s.level,
+                                            "line": s.line,
+                                        })
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                            .unwrap_or_else(|_| "[]".to_string());
+                            let fts_content = if !meta.is_binary {
+                                std::str::from_utf8(&content)
+                                    .ok()
+                                    .map(|s| truncate_to_char_boundary(s, fts_max).to_string())
+                            } else {
+                                None
+                            };
+                            let doc_info = DocInfo {
+                                title: meta.title,
+                                summary: meta.summary,
+                                topics_json,
+                                structure_json,
+                                is_binary: meta.is_binary,
+                                fts_content,
+                            };
+                            Some((idx, content_hash, body_hash, Some(doc_info)))
+                        }
+                        Err(e) => {
+                            tracing::warn!("cannot read {}: {}", entry.path.display(), e);
+                            None
+                        }
+                    })
+                }
+            })
+            .collect();
+        hash_results.extend(chunk_results);
+        if let Some(tick) = heartbeat {
+            tick(conn);
+        }
+    }
 
     let mut hash_map: HashMap<usize, (String, String, Option<DocInfo>)> = HashMap::new();
     for result in hash_results.into_iter().flatten() {
@@ -684,8 +732,12 @@ pub fn scan(
 
     for chunk in current_entries.chunks(batch_size) {
         match flush_batch(
-            conn, chunk, &prev_paths, &old_body_hashes,
-            scan_id, &now_str,
+            conn,
+            chunk,
+            &prev_paths,
+            &old_body_hashes,
+            scan_id,
+            &now_str,
         ) {
             Ok(batch_events) => {
                 all_events.extend(batch_events);
@@ -695,6 +747,9 @@ pub fn scan(
                     "UPDATE scan_runs SET files_seen = ?1 WHERE id = ?2",
                     params![total_files_seen as i64, scan_id],
                 )?;
+                if let Some(tick) = heartbeat {
+                    tick(conn);
+                }
                 if total_batches.is_multiple_of(10) {
                     tracing::info!(
                         "scan {scan_id} batch {total_batches} committed: {total_files_seen} files"
@@ -873,9 +928,12 @@ fn finalize_scan(
             "SELECT id, content_hash, path FROM events
              WHERE scan_id = ?1 AND event_type = 'created'",
         )?;
-        let provisional: Vec<(i64, String, String)> = stmt.query_map(params![ctx.scan_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?.filter_map(|r| r.ok()).collect();
+        let provisional: Vec<(i64, String, String)> = stmt
+            .query_map(params![ctx.scan_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
 
         for (event_id, hash, path_str) in &provisional {
             if let Some(prev_path_list) = ctx.prev_hash_to_paths.get(hash.as_str()) {
@@ -885,7 +943,8 @@ fn finalize_scan(
                     Some("moved")
                 } else {
                     let entry_path = PathBuf::from(path_str);
-                    let shared_inode = ctx.current_path_to_inode
+                    let shared_inode = ctx
+                        .current_path_to_inode
                         .get(&entry_path)
                         .and_then(|ino| ctx.current_inode_to_paths.get(ino))
                         .map(|paths| paths.len() > 1)
@@ -936,11 +995,13 @@ fn finalize_scan(
     let tier2_cataloged = ctx.catalog_dirs.len() as u32;
     for (dir_path, (total_bytes, file_count)) in ctx.catalog_dirs {
         let path_str = dir_path.to_string_lossy();
-        let existing: Option<(i64, i64)> = tx.query_row(
-            "SELECT total_bytes, file_count FROM catalog WHERE path = ?1",
-            params![path_str.as_ref()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).ok();
+        let existing: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT total_bytes, file_count FROM catalog WHERE path = ?1",
+                params![path_str.as_ref()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
 
         if let Some((prev_bytes, prev_count)) = existing {
             tx.execute(
@@ -1036,9 +1097,8 @@ pub fn load_prev_paths(conn: &Connection) -> Result<HashMap<PathBuf, PrevPathEnt
 }
 
 pub fn load_old_body_hashes(conn: &Connection) -> Result<HashMap<String, String>> {
-    let mut stmt = conn.prepare(
-        "SELECT content_hash, body_hash FROM documents WHERE body_hash IS NOT NULL",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT content_hash, body_hash FROM documents WHERE body_hash IS NOT NULL")?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
@@ -1075,17 +1135,30 @@ fn most_restrictive(a: PathClassification, b: PathClassification) -> PathClassif
         PathClassification::IndexedNoEmbed => 1,
         PathClassification::Indexed => 0,
     };
-    if rank(&a) >= rank(&b) { a } else { b }
+    if rank(&a) >= rank(&b) {
+        a
+    } else {
+        b
+    }
 }
 
 fn classify_section_rules(rules: &SectionRules, path: &Path, is_dir: bool) -> PathClassification {
-    if matches!(rules.ignored.matched(path, is_dir), ignore::Match::Ignore(_)) {
+    if matches!(
+        rules.ignored.matched(path, is_dir),
+        ignore::Match::Ignore(_)
+    ) {
         return PathClassification::Ignored;
     }
-    if matches!(rules.no_embed.matched(path, is_dir), ignore::Match::Ignore(_)) {
+    if matches!(
+        rules.no_embed.matched(path, is_dir),
+        ignore::Match::Ignore(_)
+    ) {
         return PathClassification::IndexedNoEmbed;
     }
-    if matches!(rules.cataloged.matched(path, is_dir), ignore::Match::Ignore(_)) {
+    if matches!(
+        rules.cataloged.matched(path, is_dir),
+        ignore::Match::Ignore(_)
+    ) {
         return PathClassification::Cataloged;
     }
     PathClassification::Indexed
