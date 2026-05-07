@@ -43,10 +43,14 @@ pub struct ScanParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct FindParams {
-    /// Natural-language search query
-    pub query: String,
-    /// Max results to return (default 10)
-    pub k: Option<u32>,
+    /// Natural-language search query (omit if using path or ext)
+    pub query: Option<String>,
+    /// Search by path glob (e.g. "*.toml", "~/Downloads/**")
+    pub path: Option<String>,
+    /// Search by file extension (e.g. "rs", ".toml")
+    pub ext: Option<String>,
+    /// Max results to return (default 10 for query, 200 for path/ext)
+    pub limit: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -227,12 +231,45 @@ impl SmritiServer {
     }
 
     #[tool(
-        description = "Search indexed files by content. Returns matching documents with paths and metadata."
+        description = "Search indexed files by content, path glob, or extension. Use 'query' for content search, 'path' for glob matching (e.g. \"**/*.toml\"), or 'ext' for extension filtering (e.g. \"rs\"). Provide exactly one of query/path/ext."
     )]
     async fn smriti_find(&self, Parameters(p): Parameters<FindParams>) -> String {
         let conn = self.db.lock().unwrap();
-        let k = p.k.unwrap_or(10);
-        match search::search_fts(&conn, &p.query, k, &self.config) {
+
+        if let Some(ext) = &p.ext {
+            let limit = p.limit.unwrap_or(200);
+            match search::search_extension(&conn, ext, limit, &self.config) {
+                Ok(result) => {
+                    return with_freshness(
+                        &conn,
+                        serde_json::to_string(&result)
+                            .unwrap_or_else(|e| format!("Serialization error: {e}")),
+                    )
+                }
+                Err(e) => return format!("Extension search error: {e}"),
+            }
+        }
+
+        if let Some(pattern) = &p.path {
+            let limit = p.limit.unwrap_or(200);
+            match search::search_path(&conn, pattern, limit, &self.config) {
+                Ok(result) => {
+                    return with_freshness(
+                        &conn,
+                        serde_json::to_string(&result)
+                            .unwrap_or_else(|e| format!("Serialization error: {e}")),
+                    )
+                }
+                Err(e) => return format!("Path search error: {e}"),
+            }
+        }
+
+        let query = match &p.query {
+            Some(q) => q,
+            None => return "Provide one of: query, path, or ext".to_string(),
+        };
+        let k = p.limit.unwrap_or(10);
+        match search::search_fts(&conn, query, k, &self.config) {
             Ok(result) => with_freshness(
                 &conn,
                 serde_json::to_string(&result)
