@@ -32,9 +32,18 @@ pub struct SearchResult {
     pub envelope: FreshnessEnvelope,
 }
 
+fn escape_fts5_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Result<SearchResult> {
     let total_indexed = count_documents(conn)?;
     let envelope = freshness_envelope(conn, config)?;
+    let escaped_query = escape_fts5_query(query);
 
     // Contentless FTS5: column SELECTs from document_fts return NULL, so we
     // join to documents on rowid (FTS rowid == documents.rowid by construction
@@ -56,7 +65,7 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
          LIMIT ?2",
     )?;
 
-    let rows = stmt.query_map(params![query, k], |row| {
+    let rows = stmt.query_map(params![escaped_query, k], |row| {
         let content_hash: String = row.get(0)?;
         let title: Option<String> = row.get(1)?;
         let summary: Option<String> = row.get(2)?;
