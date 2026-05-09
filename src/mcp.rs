@@ -21,7 +21,6 @@ use crate::search;
 
 #[derive(Clone)]
 pub struct SmritiServer {
-    db: Arc<Mutex<Connection>>,
     enqueue_db: Arc<Mutex<ScanEnqueuer>>,
     audit_db: Arc<Mutex<Connection>>,
     config: Arc<Config>,
@@ -142,13 +141,11 @@ fn with_freshness(conn: &Connection, json: String) -> String {
 #[tool_router]
 impl SmritiServer {
     pub fn new(
-        db: Arc<Mutex<Connection>>,
         enqueue_db: Arc<Mutex<ScanEnqueuer>>,
         audit_db: Arc<Mutex<Connection>>,
         config: Arc<Config>,
     ) -> Self {
         Self {
-            db,
             enqueue_db,
             audit_db,
             config,
@@ -156,12 +153,26 @@ impl SmritiServer {
         }
     }
 
+    /// Open a fresh readonly DB connection for a single tool invocation.
+    ///
+    /// A long-lived readonly connection wedges on FTS5 contentless tables once
+    /// the watcher's writer performs an automerge — subsequent MATCH queries on
+    /// the cached pages return "database disk image is malformed" while a
+    /// fresh connection reads the same on-disk state without errors. Per-call
+    /// opens trade a small open cost for immunity to that wedge. (smriti/31)
+    fn read_conn(&self) -> std::result::Result<Connection, String> {
+        crate::db::open_readonly(&self.config.db_path).map_err(|e| format!("DB open error: {e}"))
+    }
+
     #[tool(
         description = "Trigger a scan cycle over allowlisted roots. Enqueues a scan request for the watcher daemon and polls for completion. Fails fast if watcher is not running."
     )]
     async fn smriti_scan(&self, Parameters(p): Parameters<ScanParams>) -> String {
         {
-            let conn = self.db.lock().unwrap();
+            let conn = match self.read_conn() {
+                Ok(c) => c,
+                Err(e) => return e,
+            };
             let envelope = FreshnessEnvelope::from_watcher(&conn);
             if envelope.is_stale {
                 let reason = envelope.stale_reason.unwrap_or_else(|| "unknown".into());
@@ -206,7 +217,10 @@ impl SmritiServer {
             }
 
             let status = {
-                let conn = self.db.lock().unwrap();
+                let conn = match self.read_conn() {
+                    Ok(c) => c,
+                    Err(e) => return e,
+                };
                 match crate::db::poll_scan_request(&conn, req_id) {
                     Ok(Some(s)) => s,
                     Ok(None) => continue,
@@ -242,7 +256,10 @@ impl SmritiServer {
         description = "Search indexed files by content, path glob, or extension. Use 'query' for content search, 'path' for glob matching (e.g. \"**/*.toml\"), or 'ext' for extension filtering (e.g. \"rs\"). Provide exactly one of query/path/ext."
     )]
     async fn smriti_find(&self, Parameters(p): Parameters<FindParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
 
         if let Some(ext) = &p.ext {
             let limit = p.limit.unwrap_or(200);
@@ -291,7 +308,10 @@ impl SmritiServer {
         description = "Look up a document by its content hash. Returns metadata and current paths."
     )]
     async fn smriti_get(&self, Parameters(p): Parameters<GetParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
         match search::get_document(&conn, &p.content_hash, &self.config) {
             Ok(result) => with_freshness(
                 &conn,
@@ -306,7 +326,10 @@ impl SmritiServer {
         description = "Read a tier-1 file through the privacy gate. Enforces allowlist and ignore rules."
     )]
     async fn smriti_read(&self, Parameters(p): Parameters<ReadParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
         let audit_conn = self.audit_db.lock().unwrap();
         let config = &self.config;
 
@@ -363,7 +386,10 @@ impl SmritiServer {
 
     #[tool(description = "Overview of tracked files and cataloged directories.")]
     async fn smriti_map(&self, Parameters(p): Parameters<MapParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
 
         let tier = p.tier.as_deref().unwrap_or("all");
         let prefix = p.path_prefix.as_deref().unwrap_or("");
@@ -401,7 +427,10 @@ impl SmritiServer {
 
     #[tool(description = "Document structure: headings hierarchy for a single file.")]
     async fn smriti_outline(&self, Parameters(p): Parameters<OutlineParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
 
         let content_hash: Option<String> = conn
             .query_row(
@@ -444,7 +473,10 @@ impl SmritiServer {
         description = "Lifecycle history of a file: events showing creates, moves, updates, deletes."
     )]
     async fn smriti_history(&self, Parameters(p): Parameters<HistoryParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
         match search::history(
             &conn,
             &p.path,
@@ -465,7 +497,10 @@ impl SmritiServer {
         description = "Backup audit report: tier-1 (back this up) vs tier-2 (regenerable) breakdown."
     )]
     async fn smriti_audit(&self, Parameters(p): Parameters<AuditParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
         match search::audit(&conn, p.min_bytes, p.sort_by.as_deref(), &self.config) {
             Ok(result) => with_freshness(
                 &conn,
@@ -480,7 +515,10 @@ impl SmritiServer {
         description = "Bulk export of tier-1 file paths for backup tooling (rsync, restic, borg)."
     )]
     async fn smriti_manifest(&self, Parameters(p): Parameters<ManifestParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
         let format = p.format.as_deref().unwrap_or("paths");
         match search::manifest(&conn, format, &self.config) {
             Ok(result) => with_freshness(
@@ -499,7 +537,10 @@ impl SmritiServer {
         &self,
         #[allow(unused)] Parameters(_p): Parameters<HealthParams>,
     ) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
         match search::health(&conn, &self.config) {
             Ok(result) => serde_json::to_string(&result)
                 .unwrap_or_else(|e| format!("Serialization error: {e}")),
@@ -511,7 +552,10 @@ impl SmritiServer {
         description = "Cursor-based event stream. Returns filesystem change events (created, updated, deleted, moved, etc.) after the given cursor. Use cursor=0 for the first call, then pass next_cursor from the response. If cursor_valid is false, events were pruned and consumer should rebuild."
     )]
     async fn smriti_events_since(&self, Parameters(p): Parameters<EventsSinceParams>) -> String {
-        let conn = self.db.lock().unwrap();
+        let conn = match self.read_conn() {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
         let limit = p.limit.unwrap_or(100);
         match crate::db::events_since(&conn, p.cursor, limit) {
             Ok(page) => {

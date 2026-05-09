@@ -10,15 +10,15 @@ use crate::mcp::SmritiServer;
 pub async fn run_stdio(config: Config) -> anyhow::Result<()> {
     // Serve is read-only — migrations are watcher's responsibility (ADR 0001).
     // ScanEnqueuer is the only write path, narrowed to scan_requests INSERTs.
-    let conn = crate::db::open_readonly(&config.db_path)?;
-    let db = Arc::new(Mutex::new(conn));
+    // Read connections are opened per tool call (smriti/31): a long-lived
+    // readonly connection wedges on FTS5 over time.
     let enqueuer = crate::db::ScanEnqueuer::open(&config.db_path)?;
     let enqueue_db = Arc::new(Mutex::new(enqueuer));
     let audit_dir = config.db_path.parent().unwrap_or(std::path::Path::new("."));
     let audit_conn = crate::db::open_audit(audit_dir)?;
     let audit_db = Arc::new(Mutex::new(audit_conn));
     let cfg = Arc::new(config);
-    let server = SmritiServer::new(db, enqueue_db, audit_db, cfg);
+    let server = SmritiServer::new(enqueue_db, audit_db, cfg);
 
     let transport = rmcp::transport::stdio();
     let service = server.serve(transport).await?;
@@ -35,8 +35,6 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
     };
     use tokio_util::sync::CancellationToken;
 
-    let conn = crate::db::open_readonly(&config.db_path)?;
-    let db = Arc::new(Mutex::new(conn));
     let enqueuer = crate::db::ScanEnqueuer::open(&config.db_path)?;
     let enqueue_db = Arc::new(Mutex::new(enqueuer));
     let audit_dir = config.db_path.parent().unwrap_or(std::path::Path::new("."));
@@ -50,14 +48,12 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
 
     let session_manager = Arc::new(LocalSessionManager::default());
 
-    let db_clone = Arc::clone(&db);
     let enqueue_clone = Arc::clone(&enqueue_db);
     let audit_clone = Arc::clone(&audit_db);
     let cfg_clone = Arc::clone(&cfg);
     let mcp_service = StreamableHttpService::new(
         move || {
             Ok(SmritiServer::new(
-                Arc::clone(&db_clone),
                 Arc::clone(&enqueue_clone),
                 Arc::clone(&audit_clone),
                 Arc::clone(&cfg_clone),
