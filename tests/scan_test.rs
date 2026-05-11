@@ -141,6 +141,55 @@ fn test_catalog_dir_tracking() {
     assert!(total_bytes > 0, "total_bytes should be > 0");
 }
 
+#[test]
+fn test_cataloged_dir_retires_legacy_null_scan_rows() {
+    let root_tmp = TempDir::new().unwrap();
+    let root = root_tmp.path().to_path_buf();
+
+    let cache = root.join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("old.txt"), b"old content").unwrap();
+
+    let (config, _db_tmp) = make_config(vec![root.clone()]);
+    let mut conn = db::open(&config.db_path).unwrap();
+
+    conn.execute(
+        "INSERT INTO documents
+            (content_hash, title, summary, topics, structure, is_binary, first_seen, byte_size)
+         VALUES ('legacy_hash', 'old.txt', NULL, '[]', '[]', 0, '2026-01-01 00:00:00', 11)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO paths
+            (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
+         VALUES (?1, ?2, ?3, 0, 1000, 11, '2026-01-01 00:00:00', NULL)",
+        rusqlite::params![
+            "legacy_hash",
+            cache.join("old.txt").to_string_lossy(),
+            root.to_string_lossy(),
+        ],
+    )
+    .unwrap();
+
+    let rules = smriti::ignore::parse_smritiignore("[catalog]\ncache/\n", &root).unwrap();
+    let result = scanner::scan(&mut conn, &config, &rules).unwrap();
+
+    assert_eq!(result.tier1.deleted, 1);
+
+    let active_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL AND path LIKE '%cache/old.txt'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        active_count, 0,
+        "cataloged subtree should retire legacy active rows with NULL last_seen_scan"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // test_symlink_not_followed
 // ---------------------------------------------------------------------------

@@ -877,14 +877,16 @@ fn finalize_scan(
 
     let disappeared_count = tx.execute(
         "UPDATE paths SET disappeared = ?1
-         WHERE disappeared IS NULL AND last_seen_scan < ?2",
+         WHERE disappeared IS NULL
+           AND (last_seen_scan IS NULL OR last_seen_scan < ?2)",
         params![ctx.now_str, ctx.scan_id],
     )?;
 
     {
         let mut stmt = tx.prepare(
             "SELECT path, content_hash FROM paths
-             WHERE disappeared = ?1 AND last_seen_scan < ?2
+             WHERE disappeared = ?1
+             AND (last_seen_scan IS NULL OR last_seen_scan < ?2)
              AND NOT EXISTS (
                  SELECT 1 FROM paths p2
                  WHERE p2.path = paths.path AND p2.disappeared IS NULL
