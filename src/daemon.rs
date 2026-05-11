@@ -44,7 +44,9 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
 
     let cancel = CancellationToken::new();
 
-    let http_config = StreamableHttpServerConfig::default().with_cancellation_token(cancel.clone());
+    let http_config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_cancellation_token(cancel.clone());
 
     let session_manager = Arc::new(LocalSessionManager::default());
 
