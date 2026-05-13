@@ -19,6 +19,34 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+pub fn probe_index_health(conn: &Connection) -> Result<()> {
+    probe_base_tables(conn)?;
+    probe_fts(conn)
+}
+
+pub fn probe_fts(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("SELECT rowid FROM document_fts WHERE document_fts MATCH ?1 LIMIT 1")
+        .map_err(|e| SmritiError::from_db_context(e, "prepare FTS health probe"))?;
+    let mut rows = stmt
+        .query(["\"__smriti_health_probe_no_match__\""])
+        .map_err(|e| SmritiError::from_db_context(e, "run FTS health probe"))?;
+    while rows
+        .next()
+        .map_err(|e| SmritiError::from_db_context(e, "read FTS health probe"))?
+        .is_some()
+    {}
+    Ok(())
+}
+
+fn probe_base_tables(conn: &Connection) -> Result<()> {
+    conn.query_row("SELECT COUNT(*) FROM documents", [], |_| Ok(()))
+        .map_err(|e| SmritiError::from_db_context(e, "probe documents table"))?;
+    conn.query_row("SELECT COUNT(*) FROM paths", [], |_| Ok(()))
+        .map_err(|e| SmritiError::from_db_context(e, "probe paths table"))?;
+    Ok(())
+}
+
 fn open_connection(path: &Path) -> Result<Connection> {
     let conn = if path.as_os_str() == ":memory:" {
         Connection::open_in_memory()?
@@ -496,6 +524,36 @@ mod tests {
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert_eq!(tables, vec!["scan_requests", "watcher_heartbeat"]);
+    }
+
+    #[test]
+    fn test_probe_index_health_ok_on_fresh_db() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        probe_index_health(&conn).unwrap();
+    }
+
+    #[test]
+    fn test_probe_fts_classifies_corrupt_virtual_table() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        conn.execute(
+            "INSERT INTO documents (content_hash, first_seen) VALUES ('abc', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO document_fts (rowid, title, topics, summary, content)
+             VALUES (1, 'hello', '[]', '', 'hello world')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE document_fts_data SET block = x'00' WHERE id = (SELECT max(id) FROM document_fts_data)",
+            [],
+        )
+        .unwrap();
+
+        let err = probe_fts(&conn).unwrap_err();
+        assert!(err.is_index_corrupt(), "{err}");
     }
 
     #[test]

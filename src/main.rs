@@ -195,7 +195,16 @@ fn main() -> Result<()> {
             }
         }
         Commands::EventsSince { cursor, limit } => cmd_events_since(&config, cursor, limit)?,
-        Commands::Watch => smriti::watcher::run_watch(&config)?,
+        Commands::Watch => {
+            if let Err(e) = smriti::watcher::run_watch(&config) {
+                eprintln!("Error: {e}");
+                if let Some(hint) = e.repair_hint() {
+                    eprintln!("Next action: {hint}");
+                    std::process::exit(smriti::error::INDEX_CORRUPT_EXIT_STATUS);
+                }
+                return Err(e.into());
+            }
+        }
         Commands::Triage => cmd_triage(&config)?,
         Commands::BackupAudit { root } => cmd_backup_audit(&config, &root)?,
         Commands::InstallServices { enable } => cmd_install_services(enable)?,
@@ -393,7 +402,6 @@ fn cmd_audit(
     }
     println!();
 
-
     println!(
         "Backup target: {}",
         format_bytes(result.backup_target_bytes)
@@ -441,7 +449,17 @@ fn cmd_find(
     }
 
     let query = query.ok_or_else(|| anyhow::anyhow!("provide a query, or use --path/--ext"))?;
-    let result = search::search_fts(&conn, query, k, config)?;
+    let result = match search::search_fts(&conn, query, k, config) {
+        Ok(result) => result,
+        Err(e) if e.is_index_corrupt() => {
+            eprintln!("Content search unavailable: {e}");
+            if let Some(hint) = e.repair_hint() {
+                eprintln!("Next action: {hint}");
+            }
+            anyhow::bail!(e);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     if result.results.is_empty() {
         println!("No results for: {query}");
@@ -659,6 +677,20 @@ fn cmd_health(config: &Config) -> Result<()> {
     println!("Version:   {}", result.version);
     println!("Indexed:   {} documents", result.total_indexed);
     println!("Cataloged: {} directories", result.total_cataloged);
+    println!(
+        "FTS:       {}",
+        if result.fts_ok { "ok" } else { "corrupt" }
+    );
+    if let Some(ref err) = result.index_error {
+        println!("Index error: {err}");
+        println!(
+            "Next action: {}",
+            smriti::error::SmritiError::IndexCorrupt {
+                message: err.clone()
+            }
+            .next_action()
+        );
+    }
     if let Some(ref scan) = result.last_scan {
         println!("Last scan: {scan}");
     } else {
@@ -830,23 +862,7 @@ fn cmd_install_services(enable: bool) -> Result<()> {
     let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME not set"))?;
     let smriti_bin = format!("{home}/.cargo/bin/smriti");
 
-    let unit_content = format!(
-        r#"[Unit]
-Description=smriti-watch filesystem watcher
-After=default.target
-
-[Service]
-Type=simple
-ExecStart={smriti_bin} watch
-Restart=always
-RestartSec=2
-TimeoutStopSec=30
-Environment=RUST_LOG=info
-
-[Install]
-WantedBy=default.target
-"#
-    );
+    let unit_content = watch_unit_content(&smriti_bin);
 
     let service_dir = format!("{home}/.config/systemd/user");
     std::fs::create_dir_all(&service_dir)?;
@@ -876,6 +892,27 @@ WantedBy=default.target
     Ok(())
 }
 
+fn watch_unit_content(smriti_bin: &str) -> String {
+    format!(
+        r#"[Unit]
+Description=smriti-watch filesystem watcher
+
+[Service]
+Type=simple
+ExecStart={smriti_bin} watch
+Restart=on-failure
+RestartPreventExitStatus={}
+RestartSec=2
+TimeoutStopSec=30
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+"#,
+        smriti::error::INDEX_CORRUPT_EXIT_STATUS
+    )
+}
+
 fn parse_duration_string(s: &str) -> Result<std::time::Duration> {
     let s = s.trim();
     if let Some(days) = s.strip_suffix('d') {
@@ -887,5 +924,21 @@ fn parse_duration_string(s: &str) -> Result<std::time::Duration> {
     } else {
         let secs: u64 = s.parse()?;
         Ok(std::time::Duration::from_secs(secs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_unit_prevents_restart_on_index_corruption_exit() {
+        let unit = watch_unit_content("/tmp/smriti");
+
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains(&format!(
+            "RestartPreventExitStatus={}",
+            smriti::error::INDEX_CORRUPT_EXIT_STATUS
+        )));
     }
 }

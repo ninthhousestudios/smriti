@@ -300,6 +300,12 @@ impl SmritiServer {
                 serde_json::to_string(&result)
                     .unwrap_or_else(|e| format!("Serialization error: {e}")),
             ),
+            Err(e) if e.is_index_corrupt() => serde_json::json!({
+                "error": "content search unavailable",
+                "reason": e.to_string(),
+                "next_action": e.repair_hint(),
+            })
+            .to_string(),
             Err(e) => format!("Search error: {e}"),
         }
     }

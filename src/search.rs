@@ -48,8 +48,9 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
     // join to documents on rowid (FTS rowid == documents.rowid by construction
     // in flush_batch). The JOIN also filters out orphan FTS rows whose
     // documents row was deleted.
-    let mut stmt = conn.prepare(
-        "SELECT
+    let mut stmt = conn
+        .prepare(
+            "SELECT
             d.content_hash,
             d.title,
             d.summary,
@@ -61,28 +62,25 @@ pub fn search_fts(conn: &Connection, query: &str, k: u32, config: &Config) -> Re
          WHERE document_fts MATCH ?1
          ORDER BY rank
          LIMIT ?2",
-    )?;
+        )
+        .map_err(|e| SmritiError::from_db_context(e, "prepare content search"))?;
 
-    let rows = stmt.query_map(params![escaped_query, k], |row| {
-        let content_hash: String = row.get(0)?;
-        let title: Option<String> = row.get(1)?;
-        let summary: Option<String> = row.get(2)?;
-        let topics_json: Option<String> = row.get(3)?;
-        let byte_size: Option<i64> = row.get(4)?;
-        let rank: f64 = row.get(5)?;
-        Ok((
-            content_hash,
-            title,
-            summary,
-            topics_json,
-            byte_size,
-            rank,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(params![escaped_query, k], |row| {
+            let content_hash: String = row.get(0)?;
+            let title: Option<String> = row.get(1)?;
+            let summary: Option<String> = row.get(2)?;
+            let topics_json: Option<String> = row.get(3)?;
+            let byte_size: Option<i64> = row.get(4)?;
+            let rank: f64 = row.get(5)?;
+            Ok((content_hash, title, summary, topics_json, byte_size, rank))
+        })
+        .map_err(|e| SmritiError::from_db_context(e, "run content search"))?;
 
     let mut results = Vec::new();
     for row in rows {
-        let (content_hash, title, summary, topics_json, byte_size, rank) = row?;
+        let (content_hash, title, summary, topics_json, byte_size, rank) =
+            row.map_err(|e| SmritiError::from_db_context(e, "read content search result"))?;
 
         let topics: Vec<String> = topics_json
             .and_then(|j| serde_json::from_str(&j).ok())
@@ -670,6 +668,9 @@ pub struct HealthResult {
     pub total_cataloged: i64,
     pub last_scan: Option<String>,
     pub version: String,
+    pub fts_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watcher: Option<WatcherStatus>,
 }
@@ -695,15 +696,23 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
         .collect();
 
     let watcher = read_watcher_status(conn).unwrap_or(None);
+    let fts_probe = crate::db::probe_fts(conn);
+    let (status, fts_ok, index_error) = match fts_probe {
+        Ok(()) => ("ok".to_string(), true, None),
+        Err(e) if e.is_index_corrupt() => ("corrupt".to_string(), false, Some(e.to_string())),
+        Err(e) => ("degraded".to_string(), false, Some(e.to_string())),
+    };
 
     Ok(HealthResult {
-        status: "ok".to_string(),
+        status,
         db_path: config.db_path.to_string_lossy().to_string(),
         roots,
         total_indexed,
         total_cataloged,
         last_scan,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        fts_ok,
+        index_error,
         watcher,
     })
 }

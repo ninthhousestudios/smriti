@@ -66,6 +66,7 @@ pub fn run_watch_with_shutdown(config: &Config, shutdown: &AtomicBool) -> Result
     let mut conn = db::open(&config.db_path)?;
 
     recover_crashed_scans(&conn)?;
+    db::probe_index_health(&conn)?;
 
     let mut roots = crate::roots::load_roots(config)?;
     if roots.is_empty() {
