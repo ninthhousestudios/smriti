@@ -158,6 +158,67 @@ fn watcher_indexes_new_directory_children() {
 }
 
 #[test]
+fn watcher_respects_ignore_rules_for_new_events() {
+    let db_dir = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let config = make_config(&db_dir, &root);
+    let root_path = root.path().to_path_buf();
+
+    std::fs::write(
+        root_path.join(".smritiignore"),
+        "ignored/\n[catalog]\ncataloged/\n",
+    )
+    .unwrap();
+    let ignored = root_path.join("ignored");
+    std::fs::create_dir(&ignored).unwrap();
+    let cataloged = root_path.join("cataloged");
+    std::fs::create_dir(&cataloged).unwrap();
+    let git_dir = root_path.join(".git");
+    std::fs::create_dir(&git_dir).unwrap();
+
+    let _conn = db::open(&config.db_path).unwrap();
+    drop(_conn);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        watcher::run_watch_with_shutdown(&config_clone, &shutdown_clone)
+    });
+
+    std::thread::sleep(Duration::from_millis(1000));
+
+    std::fs::write(ignored.join("secret.txt"), "do not index").unwrap();
+
+    std::fs::write(cataloged.join("cache.txt"), "catalog only").unwrap();
+
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main").unwrap();
+
+    std::thread::sleep(Duration::from_millis(3000));
+
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = handle.join();
+
+    let conn = db::open_readonly(&config.db_path).unwrap();
+    let ignored_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths
+             WHERE disappeared IS NULL
+               AND (path LIKE '%/ignored/%'
+                    OR path LIKE '%/cataloged/%'
+                    OR path LIKE '%/.git/%')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ignored_count, 0,
+        "watcher should not tier-1 index ignored or cataloged event paths"
+    );
+}
+
+#[test]
 fn watcher_rename_within_root() {
     let db_dir = TempDir::new().unwrap();
     let root = TempDir::new().unwrap();

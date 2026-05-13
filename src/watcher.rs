@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use ::ignore::Match;
 use chrono::Utc;
 use notify::{EventKind, RecursiveMode, Watcher};
 use rusqlite::{params, Connection};
@@ -14,7 +15,7 @@ use crate::db;
 use crate::debounce::{DebounceBuffer, FlushedEvent, FlushedKind, FsEventKind};
 use crate::error::{Result, SmritiError};
 use crate::hasher;
-use crate::ignore::{self, PathClassification, SectionRules};
+use crate::ignore::{self, IgnoreStack, PathClassification, SectionRules};
 use crate::metadata;
 use crate::scanner::{self, CurrentEntry, DocInfo, PrevPathEntry};
 
@@ -901,8 +902,8 @@ fn handle_file(
     global_rules: &SectionRules,
     ctx: &WatcherCtx,
 ) -> Result<Option<FileIndexed>> {
-    let classification = classify_path(path, global_rules);
-    if classification == PathClassification::Ignored {
+    let classification = classify_path(path, root, global_rules)?;
+    if classification != PathClassification::Indexed {
         return Ok(None);
     }
 
@@ -980,12 +981,22 @@ fn handle_new_directory(
     global_rules: &SectionRules,
     ctx: &WatcherCtx,
 ) -> Result<Vec<FileIndexed>> {
+    let classification = classify_path(dir, root, global_rules)?;
+    if classification != PathClassification::Indexed {
+        return Ok(Vec::new());
+    }
+
     let mut indexed = Vec::new();
     for entry in WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        if entry.file_type().is_dir()
+            && classify_path(entry.path(), root, global_rules)? != PathClassification::Indexed
+        {
+            continue;
+        }
         if entry.file_type().is_file() {
             if let Some(fi) = handle_file(conn, config, entry.path(), root, global_rules, ctx)? {
                 indexed.push(fi);
@@ -1036,9 +1047,68 @@ fn build_doc_entry(
     (content_hash, body_hash, Some(doc_info))
 }
 
-fn classify_path(path: &Path, global_rules: &SectionRules) -> PathClassification {
+fn classify_path(
+    path: &Path,
+    root: &Path,
+    global_rules: &SectionRules,
+) -> Result<PathClassification> {
     let is_dir = path.is_dir();
-    global_rules.classify(path, is_dir)
+    let mut stack = IgnoreStack::new(ignore::hardened_defaults(root));
+
+    let mut dirs = Vec::new();
+    let mut current = if is_dir { Some(path) } else { path.parent() };
+    while let Some(dir) = current {
+        if dir.starts_with(root) {
+            dirs.push(dir.to_path_buf());
+        }
+        if dir == root {
+            break;
+        }
+        current = dir.parent();
+    }
+
+    for dir in dirs.iter().rev() {
+        stack.push_dir(dir)?;
+    }
+
+    let mut classification = PathClassification::Indexed;
+    for dir in dirs.iter().rev() {
+        classification = most_restrictive(
+            classification,
+            classify_section_rules(global_rules, dir, true),
+        );
+        classification = most_restrictive(classification, stack.classify(dir, true));
+    }
+    classification = most_restrictive(
+        classification,
+        classify_section_rules(global_rules, path, is_dir),
+    );
+    classification = most_restrictive(classification, stack.classify(path, is_dir));
+
+    Ok(classification)
+}
+
+fn classify_section_rules(rules: &SectionRules, path: &Path, is_dir: bool) -> PathClassification {
+    if matches!(rules.ignored.matched(path, is_dir), Match::Ignore(_)) {
+        return PathClassification::Ignored;
+    }
+    if matches!(rules.cataloged.matched(path, is_dir), Match::Ignore(_)) {
+        return PathClassification::Cataloged;
+    }
+    PathClassification::Indexed
+}
+
+fn most_restrictive(a: PathClassification, b: PathClassification) -> PathClassification {
+    let rank = |c: &PathClassification| match c {
+        PathClassification::Ignored => 2,
+        PathClassification::Cataloged => 1,
+        PathClassification::Indexed => 0,
+    };
+    if rank(&a) >= rank(&b) {
+        a
+    } else {
+        b
+    }
 }
 
 fn update_prev_paths(prev_paths: &mut HashMap<PathBuf, PrevPathEntry>, fe: &FlushedEvent) {
