@@ -1,5 +1,7 @@
 # smriti
 
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
+
 *smriti* (स्मृति — "that which is remembered") is the **filesystem perception
 layer** for agents and downstream tools. It maintains a content-addressed,
 allowlist-gated, audited index of what files exist under your chosen roots,
@@ -11,7 +13,7 @@ by their BLAKE3 content hash so identical content at different paths is
 recognized as the same document, and so moves, copies, hardlinks, and edits
 are detected across scans.
 
-smriti is one tier of [manas](https://github.com/josharp/manas) (मनस् — "mind"),
+smriti is one tier of [manas](https://github.com/ninthhousestudios/manas) (मनस् — "mind"),
 a personal AI operating system. It pairs with **kosha** (the document
 *comprehension* tier) to give agents a clean two-step model: *smriti finds the
 file; kosha reads what's inside*. See the
@@ -59,7 +61,7 @@ smriti's search is a *file-finder*, not a *passage-finder*.
 |---|---|---|
 | Markdown / plain text (< 100 KB) | Title, summary, topics, content | All of it via FTS |
 | Markdown / plain text (> 100 KB) | Title, summary, topics, first 100 KB of content | Title/topics/summary + the excerpt |
-| Source code | Filename, size, mime | Path, name, extension. Use [sutra](https://github.com/josharp/manas) for code search. |
+| Source code | Filename, size, mime | Path, name, extension. Use [sutra](https://github.com/ninthhousestudios/manas) for code search. |
 | PDFs, epubs, docx, scanned books | **Filename, size, mime only** | Path, name, extension — **not** the document text |
 | Images, audio, video | Filename, size, mime | Path, name, extension |
 
@@ -81,7 +83,7 @@ page 47 says.
 - **No deep semantic search.** An optional dense-embedding feature flag exists
   (BGE-M3 over the same shallow material as FTS), but for real semantic
   retrieval over document content, kosha is the answer.
-- **No code intelligence.** That's [sutra](https://github.com/josharp/manas).
+- **No code intelligence.** That's [sutra](https://github.com/ninthhousestudios/manas).
 - **No long-term memory of decisions or conversations.** That's chitta.
 
 ## Install
@@ -90,11 +92,6 @@ page 47 says.
 cargo install --path .
 ```
 
-With dense embeddings:
-
-```bash
-cargo install --path . --features embedding
-```
 
 ## Quick start
 
@@ -324,8 +321,6 @@ allowlist rules and logs every access.
 - Triage command with editor-based UX
 - Backup audit for comparing roots
 
-**Feature-gated:**
-- Dense embeddings via BGE-M3 ONNX (`--features embedding` + `SMRITI_MODEL_PATH`)
 
 ## Planned
 
@@ -380,7 +375,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 Clone and install:
 
 ```bash
-git clone https://github.com/josharp/manas.git
+git clone https://github.com/ninthhousestudios/manas.git
 cd manas/smriti
 cargo install --path .
 ```
@@ -395,12 +390,7 @@ cd manas/smriti
 cargo install --path .
 ```
 
-With dense embeddings (requires downloading the BGE-M3 ONNX model separately):
-
-```bash
-cargo install --path . --features embedding
-```
 
 ## License
 
-TBD
+MPL-2.0

@@ -8,6 +8,7 @@ Cargo.lock
 .env.*
 .claude/
 .sutra/
+.codex
 
 # AgentOps session artifacts
 .agents/
