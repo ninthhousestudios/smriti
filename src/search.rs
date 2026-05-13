@@ -672,6 +672,8 @@ pub struct HealthResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub watcher: Option<WatcherStatus>,
 }
 
@@ -697,10 +699,13 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
 
     let watcher = read_watcher_status(conn).unwrap_or(None);
     let fts_probe = crate::db::probe_fts(conn);
-    let (status, fts_ok, index_error) = match fts_probe {
-        Ok(()) => ("ok".to_string(), true, None),
-        Err(e) if e.is_index_corrupt() => ("corrupt".to_string(), false, Some(e.to_string())),
-        Err(e) => ("degraded".to_string(), false, Some(e.to_string())),
+    let (status, fts_ok, index_error, repair_hint) = match fts_probe {
+        Ok(()) => ("ok".to_string(), true, None, None),
+        Err(e) => {
+            let hint = e.repair_hint().map(str::to_string);
+            let label = if e.is_index_corrupt() { "corrupt" } else { "degraded" };
+            (label.to_string(), false, Some(e.to_string()), hint)
+        }
     };
 
     Ok(HealthResult {
@@ -713,6 +718,7 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         fts_ok,
         index_error,
+        repair_hint,
         watcher,
     })
 }

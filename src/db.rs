@@ -40,10 +40,16 @@ pub fn probe_fts(conn: &Connection) -> Result<()> {
 }
 
 fn probe_base_tables(conn: &Connection) -> Result<()> {
-    conn.query_row("SELECT COUNT(*) FROM documents", [], |_| Ok(()))
-        .map_err(|e| SmritiError::from_db_context(e, "probe documents table"))?;
-    conn.query_row("SELECT COUNT(*) FROM paths", [], |_| Ok(()))
-        .map_err(|e| SmritiError::from_db_context(e, "probe paths table"))?;
+    conn.query_row("SELECT 1 FROM documents LIMIT 1", [], |_| Ok(()))
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(()),
+            other => Err(SmritiError::from_db_context(other, "probe documents table")),
+        })?;
+    conn.query_row("SELECT 1 FROM paths LIMIT 1", [], |_| Ok(()))
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(()),
+            other => Err(SmritiError::from_db_context(other, "probe paths table")),
+        })?;
     Ok(())
 }
 

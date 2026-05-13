@@ -65,6 +65,7 @@ impl SmritiError {
 
     pub fn next_action(&self) -> &'static str {
         match self {
+            Self::Db(err) if is_sqlite_corruption(err) => "Stop smriti services, move or delete ~/.smriti/index.db*, then restart smriti-watch to rebuild the index.",
             Self::Db(_) => "Check the database file at SMRITI_DB_PATH; run `smriti health` for diagnostics.",
             Self::IndexCorrupt { .. } => "Stop smriti services, move or delete ~/.smriti/index.db*, then restart smriti-watch to rebuild the index.",
             Self::Migration { .. } => "Inspect the migration file at migrations/0001_initial.sql and ensure the database schema is consistent.",

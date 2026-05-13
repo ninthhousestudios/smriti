@@ -683,13 +683,9 @@ fn cmd_health(config: &Config) -> Result<()> {
     );
     if let Some(ref err) = result.index_error {
         println!("Index error: {err}");
-        println!(
-            "Next action: {}",
-            smriti::error::SmritiError::IndexCorrupt {
-                message: err.clone()
-            }
-            .next_action()
-        );
+    }
+    if let Some(ref hint) = result.repair_hint {
+        println!("Next action: {hint}");
     }
     if let Some(ref scan) = result.last_scan {
         println!("Last scan: {scan}");
@@ -896,11 +892,12 @@ fn watch_unit_content(smriti_bin: &str) -> String {
     format!(
         r#"[Unit]
 Description=smriti-watch filesystem watcher
+After=default.target
 
 [Service]
 Type=simple
 ExecStart={smriti_bin} watch
-Restart=on-failure
+Restart=always
 RestartPreventExitStatus={}
 RestartSec=2
 TimeoutStopSec=30
@@ -935,7 +932,7 @@ mod tests {
     fn watch_unit_prevents_restart_on_index_corruption_exit() {
         let unit = watch_unit_content("/tmp/smriti");
 
-        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("Restart=always"));
         assert!(unit.contains(&format!(
             "RestartPreventExitStatus={}",
             smriti::error::INDEX_CORRUPT_EXIT_STATUS
