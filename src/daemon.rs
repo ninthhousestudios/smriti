@@ -48,7 +48,9 @@ pub async fn run_http(config: Config, host: &str, port: u16) -> anyhow::Result<(
         .with_stateful_mode(false)
         .with_cancellation_token(cancel.clone());
 
-    let session_manager = Arc::new(LocalSessionManager::default());
+    let mut session_manager = LocalSessionManager::default();
+    session_manager.session_config.keep_alive = None;
+    let session_manager = Arc::new(session_manager);
 
     let enqueue_clone = Arc::clone(&enqueue_db);
     let audit_clone = Arc::clone(&audit_db);
