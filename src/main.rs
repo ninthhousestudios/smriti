@@ -123,7 +123,7 @@ enum Commands {
         /// Root to audit (e.g., /mnt/usb-backup)
         root: PathBuf,
     },
-    /// Install systemd user service for smriti-watch
+    /// Install systemd user services for smriti-watch and smriti-serve
     InstallServices {
         /// Enable and start the service after installing
         #[arg(long)]
@@ -858,14 +858,19 @@ fn cmd_install_services(enable: bool) -> Result<()> {
     let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME not set"))?;
     let smriti_bin = format!("{home}/.cargo/bin/smriti");
 
-    let unit_content = watch_unit_content(&smriti_bin);
+    let watch_unit = watch_unit_content(&smriti_bin);
+    let serve_unit = serve_unit_content(&smriti_bin);
 
     let service_dir = format!("{home}/.config/systemd/user");
     std::fs::create_dir_all(&service_dir)?;
 
-    let service_path = format!("{service_dir}/smriti-watch.service");
-    std::fs::write(&service_path, unit_content)?;
-    println!("Wrote {service_path}");
+    let watch_service_path = format!("{service_dir}/smriti-watch.service");
+    std::fs::write(&watch_service_path, watch_unit)?;
+    println!("Wrote {watch_service_path}");
+
+    let serve_service_path = format!("{service_dir}/smriti-serve.service");
+    std::fs::write(&serve_service_path, serve_unit)?;
+    println!("Wrote {serve_service_path}");
 
     let status = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
@@ -877,12 +882,20 @@ fn cmd_install_services(enable: bool) -> Result<()> {
 
     if enable {
         let status = std::process::Command::new("systemctl")
-            .args(["--user", "enable", "--now", "smriti-watch.service"])
+            .args([
+                "--user",
+                "enable",
+                "--now",
+                "smriti-watch.service",
+                "smriti-serve.service",
+            ])
             .status()?;
         if !status.success() {
-            anyhow::bail!("systemctl --user enable --now smriti-watch.service failed");
+            anyhow::bail!(
+                "systemctl --user enable --now smriti-watch.service smriti-serve.service failed"
+            );
         }
-        println!("Enabled and started smriti-watch.service");
+        println!("Enabled and started smriti-watch.service and smriti-serve.service");
     }
 
     Ok(())
@@ -892,7 +905,6 @@ fn watch_unit_content(smriti_bin: &str) -> String {
     format!(
         r#"[Unit]
 Description=smriti-watch filesystem watcher
-After=default.target
 
 [Service]
 Type=simple
@@ -907,6 +919,25 @@ Environment=RUST_LOG=info
 WantedBy=default.target
 "#,
         smriti::error::INDEX_CORRUPT_EXIT_STATUS
+    )
+}
+
+fn serve_unit_content(smriti_bin: &str) -> String {
+    format!(
+        r#"[Unit]
+Description=smriti MCP server
+Requires=smriti-watch.service
+After=smriti-watch.service
+
+[Service]
+Type=simple
+ExecStart={smriti_bin} serve
+Restart=always
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+"#
     )
 }
 
@@ -937,5 +968,23 @@ mod tests {
             "RestartPreventExitStatus={}",
             smriti::error::INDEX_CORRUPT_EXIT_STATUS
         )));
+    }
+
+    #[test]
+    fn watch_unit_does_not_order_after_default_target() {
+        let unit = watch_unit_content("/tmp/smriti");
+
+        assert!(unit.contains("WantedBy=default.target"));
+        assert!(!unit.contains("After=default.target"));
+    }
+
+    #[test]
+    fn serve_unit_orders_after_watch_without_default_cycle() {
+        let unit = serve_unit_content("/tmp/smriti");
+
+        assert!(unit.contains("Requires=smriti-watch.service"));
+        assert!(unit.contains("After=smriti-watch.service"));
+        assert!(unit.contains("WantedBy=default.target"));
+        assert!(!unit.contains("After=default.target"));
     }
 }
