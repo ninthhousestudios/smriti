@@ -3,8 +3,8 @@ name = "smriti"
 version = "0.3.5"
 edition = "2021"
 description = "Content-addressed filesystem indexer for the manas ecosystem"
-license = "MPL-2.0"
-repository = "https://github.com/ninthhousestudios/manas"
+license = "AGPL-3.0"
+repository = "https://github.com/ninthhousestudios/manas/smriti"
 
 [lib]
 name = "smriti"
