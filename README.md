@@ -1,6 +1,6 @@
 # smriti
 
-[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 *smriti* (स्मृति — "that which is remembered") is the **filesystem perception
 layer** for agents and downstream tools. It maintains a content-addressed,
@@ -116,7 +116,7 @@ smriti audit
 smriti triage
 
 # Export a file list for your backup tool
-smriti manifest | rsync -av --files-from=- / /mnt/backup/
+smriti manifest | rsync -avhP --files-from=- / /mnt/backup/
 
 # Start the MCP server
 smriti serve
@@ -390,7 +390,3 @@ cd manas/smriti
 cargo install --path .
 ```
 
-
-## License
-
-MPL-2.0
