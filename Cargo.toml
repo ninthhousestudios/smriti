@@ -4,7 +4,7 @@ version = "0.3.5"
 edition = "2021"
 description = "Content-addressed filesystem indexer for the manas ecosystem"
 license = "AGPL-3.0"
-repository = "https://github.com/ninthhousestudios/manas/smriti"
+repository = "https://github.com/ninthhousestudios/smriti"
 
 [lib]
 name = "smriti"
