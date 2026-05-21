@@ -106,8 +106,10 @@ fn test_hardened_defaults_cover_secrets() {
     let secrets = [
         (".env", false),
         (".env.local", false),
+        (".envrc", false),
         ("server.pem", false),
         ("private.key", false),
+        ("client.pfx", false),
         ("id_rsa", false),
         ("id_rsa.pub", false),
         (".ssh", true),
@@ -116,6 +118,12 @@ fn test_hardened_defaults_cover_secrets() {
         ("credentials", false),
         (".aws", true),
         (".gnupg", true),
+        (".config/BraveSoftware/Brave-Browser/Default/Cookies", false),
+        (
+            ".config/BraveSoftware/Brave-Browser/Default/Cookies-journal",
+            false,
+        ),
+        (".mozilla/firefox/profile.default/cookies.sqlite", false),
     ];
 
     for (rel, is_dir) in &secrets {
@@ -127,6 +135,29 @@ fn test_hardened_defaults_cover_secrets() {
             "expected {rel} to be Ignored, got {got:?}"
         );
     }
+}
+
+#[test]
+fn test_hardened_defaults_catalog_regenerable_toolchains() {
+    let tmp = TempDir::new().unwrap();
+    let global = hardened_defaults(tmp.path());
+    let stack = IgnoreStack::new(global);
+
+    let path = tmp.path().join(".rustup/toolchains/stable/bin/rustc");
+    let got = stack.classify(&path, false);
+    assert_eq!(
+        got,
+        PathClassification::Cataloged,
+        "expected .rustup toolchain contents to be Cataloged, got {got:?}"
+    );
+
+    let dart_tool_path = tmp.path().join(".dart-tool/telemetry.json");
+    let got = stack.classify(&dart_tool_path, false);
+    assert_eq!(
+        got,
+        PathClassification::Cataloged,
+        "expected .dart-tool contents to be Cataloged, got {got:?}"
+    );
 }
 
 /// Subdirectory .smritiignore overrides parent rules via push_dir / pop.

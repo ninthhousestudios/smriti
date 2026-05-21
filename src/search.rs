@@ -416,6 +416,14 @@ pub struct CatalogEntry {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PolicyViolation {
+    pub category: String,
+    pub pattern: String,
+    pub count: i64,
+    pub examples: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct AuditResult {
     pub tier1_total_files: i64,
     pub tier1_total_bytes: i64,
@@ -423,6 +431,7 @@ pub struct AuditResult {
     pub tier2_total_dirs: i64,
     pub tier2_total_bytes: i64,
     pub tier2_largest: Vec<CatalogEntry>,
+    pub policy_violations: Vec<PolicyViolation>,
     pub roots: Vec<String>,
     pub backup_target_bytes: i64,
     #[serde(flatten)]
@@ -502,8 +511,9 @@ pub fn audit(
         .filter_map(|r| r.ok())
         .collect();
 
-    let roots: Vec<String> = config
-        .roots
+    let policy_violations = policy_violations(conn)?;
+
+    let roots: Vec<String> = crate::roots::load_roots(config)?
         .iter()
         .map(|r| r.to_string_lossy().to_string())
         .collect();
@@ -515,6 +525,7 @@ pub fn audit(
         tier2_total_dirs,
         tier2_total_bytes,
         tier2_largest,
+        policy_violations,
         roots,
         backup_target_bytes: tier1_total_bytes,
         envelope,
@@ -637,7 +648,7 @@ pub fn read_watcher_status(conn: &Connection) -> Result<Option<WatcherStatus>> {
             let stale = updated
                 .map(|u| (now - u).num_seconds() > 30)
                 .unwrap_or(true);
-            let running = !stale && state != "stopped";
+            let running = state != "stopped" && (!stale || process_exists(pid));
             let uptime_seconds = started.map(|s| (now - s).num_seconds()).unwrap_or(0);
 
             Ok(Some(WatcherStatus {
@@ -659,12 +670,38 @@ pub fn read_watcher_status(conn: &Connection) -> Result<Option<WatcherStatus>> {
     }
 }
 
+#[cfg(unix)]
+fn process_exists(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: i64) -> bool {
+    false
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthResult {
     pub status: String,
     pub db_path: String,
     pub roots: Vec<String>,
+    /// Current active tier-1 path rows.
     pub total_indexed: i64,
+    /// Current active tier-1 path rows.
+    pub total_active_paths: i64,
+    /// All path rows, including historical/disappeared rows.
+    pub total_paths_all: i64,
+    /// Unique content versions in the documents table.
+    pub total_documents: i64,
+    /// FTS rows for searchable non-binary document versions.
+    pub total_fts_rows: i64,
     pub total_cataloged: i64,
     pub last_scan: Option<String>,
     pub version: String,
@@ -678,7 +715,10 @@ pub struct HealthResult {
 }
 
 pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
-    let total_indexed = count_documents(conn)?;
+    let total_active_paths = count_active_paths(conn)?;
+    let total_paths_all = count_all_paths(conn)?;
+    let total_documents = count_documents(conn)?;
+    let total_fts_rows = count_fts_rows(conn)?;
 
     let total_cataloged: i64 =
         conn.query_row("SELECT COUNT(*) FROM catalog", [], |row| row.get(0))?;
@@ -691,8 +731,7 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
         )
         .ok();
 
-    let roots: Vec<String> = config
-        .roots
+    let roots: Vec<String> = crate::roots::load_roots(config)?
         .iter()
         .map(|r| r.to_string_lossy().to_string())
         .collect();
@@ -703,7 +742,11 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
         Ok(()) => ("ok".to_string(), true, None, None),
         Err(e) => {
             let hint = e.repair_hint().map(str::to_string);
-            let label = if e.is_index_corrupt() { "corrupt" } else { "degraded" };
+            let label = if e.is_index_corrupt() {
+                "corrupt"
+            } else {
+                "degraded"
+            };
             (label.to_string(), false, Some(e.to_string()), hint)
         }
     };
@@ -712,7 +755,11 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
         status,
         db_path: config.db_path.to_string_lossy().to_string(),
         roots,
-        total_indexed,
+        total_indexed: total_active_paths,
+        total_active_paths,
+        total_paths_all,
+        total_documents,
+        total_fts_rows,
         total_cataloged,
         last_scan,
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -727,8 +774,82 @@ pub fn health(conn: &Connection, config: &Config) -> Result<HealthResult> {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+fn count_active_paths(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn count_all_paths(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM paths", [], |row| row.get(0))?)
+}
+
 fn count_documents(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?)
+}
+
+fn count_fts_rows(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM document_fts", [], |row| row.get(0))?)
+}
+
+fn policy_violations(conn: &Connection) -> Result<Vec<PolicyViolation>> {
+    const MAX_EXAMPLES: usize = 5;
+    let checks = [
+        (
+            "browser_cookies",
+            "browser cookie stores",
+            "LOWER(p.path) LIKE '%/cookies%' OR LOWER(p.path) LIKE '%cookies.sqlite%'",
+        ),
+        (
+            "env_files",
+            ".env files",
+            "p.path GLOB '*/.env' OR p.path GLOB '*/.env.*' OR p.path GLOB '*/.envrc'",
+        ),
+        (
+            "private_keys",
+            "private keys/certs",
+            "LOWER(p.path) GLOB '*.pem' OR LOWER(p.path) GLOB '*.key' OR p.path GLOB '*/id_rsa*' OR LOWER(p.path) GLOB '*.pfx' OR LOWER(p.path) GLOB '*.kdbx'",
+        ),
+        (
+            "secret_dirs",
+            "secret-bearing dotdirs",
+            "p.path LIKE '%/.ssh/%' OR p.path LIKE '%/.aws/%' OR p.path LIKE '%/.gnupg/%'",
+        ),
+        (
+            "escaped_generated_dirs",
+            "generated/cache/build dirs",
+            "p.path GLOB '*/node_modules/*' OR p.path GLOB '*/target/*' OR p.path GLOB '*/build/*' OR p.path GLOB '*/.cache/*' OR p.path GLOB '*/.local/*' OR p.path GLOB '*/__pycache__/*' OR p.path GLOB '*/.dart_tool/*' OR p.path GLOB '*/.dart-tool/*' OR p.path GLOB '*/.gradle/*' OR p.path GLOB '*/.rustup/*'",
+        ),
+    ];
+
+    let mut violations = Vec::new();
+    for (category, pattern, predicate) in checks {
+        let count_sql =
+            format!("SELECT COUNT(*) FROM paths p WHERE p.disappeared IS NULL AND ({predicate})");
+        let count: i64 = conn.query_row(&count_sql, [], |row| row.get(0))?;
+        if count == 0 {
+            continue;
+        }
+
+        let examples_sql = format!(
+            "SELECT p.path FROM paths p WHERE p.disappeared IS NULL AND ({predicate}) ORDER BY p.path LIMIT {MAX_EXAMPLES}"
+        );
+        let mut stmt = conn.prepare(&examples_sql)?;
+        let examples = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        violations.push(PolicyViolation {
+            category: category.to_string(),
+            pattern: pattern.to_string(),
+            count,
+            examples,
+        });
+    }
+    Ok(violations)
 }
 
 fn current_path(conn: &Connection, content_hash: &str) -> Result<Option<String>> {

@@ -5,8 +5,10 @@
 *.pyc
 .env
 .env.*
+.envrc
 *.pem
 *.key
+*.pfx
 id_rsa*
 *.kdbx
 secrets.*
@@ -15,9 +17,17 @@ credentials*
 .gnupg/
 .ssh/
 **/cookies*
+**/Cookies*
+**/cookies.sqlite*
 **/.config/google-chrome/
+**/.config/chromium/
+**/.config/BraveSoftware/
+**/.config/vivaldi/
+**/.zen/*/
 **/.mozilla/firefox/*/
 [catalog]
+**/.rustup/
+**/.rustup/**
 **/node_modules/
 **/target/
 **/.flutter/
@@ -27,6 +37,8 @@ credentials*
 **/build/
 **/.gradle/
 **/.dart_tool/
+**/.dart-tool/
+**/.dart-tool/**
 .yay/
 [no-embed]
 **/*.lic

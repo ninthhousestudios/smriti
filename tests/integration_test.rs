@@ -120,7 +120,73 @@ fn test_full_lifecycle() {
     let health = search::health(&conn, &config).unwrap();
     assert_eq!(health.status, "ok");
     assert_eq!(health.total_indexed, 3);
+    assert_eq!(health.total_active_paths, 3);
+    assert_eq!(health.total_paths_all, 3);
+    assert_eq!(health.total_documents, 3);
+    assert_eq!(health.total_fts_rows, 3);
+    assert_eq!(health.total_cataloged, 0);
     assert!(health.last_scan.is_some());
+}
+
+#[test]
+fn test_audit_reports_policy_violations() {
+    let tmp = TempDir::new().unwrap();
+    let config = test_config(&tmp);
+    let root = &config.roots[0].clone();
+
+    let env_path = root.join(".envrc");
+    let cookie_path = root.join(".config/BraveSoftware/Brave-Browser/Default/Cookies");
+
+    let mut conn = smriti::db::open(&config.db_path).unwrap();
+    let permissive_rules = SectionRules::empty();
+    smriti::scanner::scan(&mut conn, &config, &permissive_rules).unwrap();
+
+    conn.execute(
+        "INSERT INTO documents
+            (content_hash, title, summary, topics, structure, is_binary, first_seen, byte_size)
+         VALUES ('legacy_cookie_hash', 'Cookies', NULL, '[]', '[]', 0, '2026-01-01 00:00:00', 9)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO documents
+            (content_hash, title, summary, topics, structure, is_binary, first_seen, byte_size)
+         VALUES ('legacy_env_hash', '.envrc', NULL, '[]', '[]', 0, '2026-01-01 00:00:00', 22)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO paths
+            (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
+         VALUES (?1, ?2, ?3, 0, 1000, 22, '2026-01-01 00:00:00', NULL)",
+        rusqlite::params![
+            "legacy_env_hash",
+            env_path.to_string_lossy(),
+            root.to_string_lossy(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO paths
+            (content_hash, path, root, is_hardlink, mtime, size_bytes, appeared, last_seen_scan)
+         VALUES (?1, ?2, ?3, 0, 1000, 9, '2026-01-01 00:00:00', NULL)",
+        rusqlite::params![
+            "legacy_cookie_hash",
+            cookie_path.to_string_lossy(),
+            root.to_string_lossy(),
+        ],
+    )
+    .unwrap();
+
+    let audit = search::audit(&conn, None, None, &config).unwrap();
+    let categories: Vec<_> = audit
+        .policy_violations
+        .iter()
+        .map(|v| v.category.as_str())
+        .collect();
+
+    assert!(categories.contains(&"env_files"));
+    assert!(categories.contains(&"browser_cookies"));
 }
 
 #[test]

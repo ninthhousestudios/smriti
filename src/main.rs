@@ -402,6 +402,25 @@ fn cmd_audit(
     }
     println!();
 
+    println!("Policy checks:");
+    if result.policy_violations.is_empty() {
+        println!("  No active tier-1 policy violations found.");
+    } else {
+        for violation in &result.policy_violations {
+            println!(
+                "  {}: {} active path(s) matching {}",
+                violation.category, violation.count, violation.pattern
+            );
+            for path in violation.examples.iter().take(3) {
+                println!("    {path}");
+            }
+            if violation.examples.len() > 3 {
+                println!("    ...");
+            }
+        }
+    }
+    println!();
+
     println!(
         "Backup target: {}",
         format_bytes(result.backup_target_bytes)
@@ -675,7 +694,13 @@ fn cmd_health(config: &Config) -> Result<()> {
     println!("Status:    {}", result.status);
     println!("DB:        {}", result.db_path);
     println!("Version:   {}", result.version);
-    println!("Indexed:   {} documents", result.total_indexed);
+    println!("Indexed:   {} active tier-1 paths", result.total_indexed);
+    println!("Paths:     {} total rows", result.total_paths_all);
+    println!(
+        "Documents: {} unique content versions",
+        result.total_documents
+    );
+    println!("FTS rows:  {}", result.total_fts_rows);
     println!("Cataloged: {} directories", result.total_cataloged);
     println!(
         "FTS:       {}",

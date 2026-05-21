@@ -423,6 +423,22 @@ impl SmritiServer {
                 serde_json::json!(h.total_indexed),
             );
             response.insert(
+                "total_active_paths".to_string(),
+                serde_json::json!(h.total_active_paths),
+            );
+            response.insert(
+                "total_paths_all".to_string(),
+                serde_json::json!(h.total_paths_all),
+            );
+            response.insert(
+                "total_documents".to_string(),
+                serde_json::json!(h.total_documents),
+            );
+            response.insert(
+                "total_fts_rows".to_string(),
+                serde_json::json!(h.total_fts_rows),
+            );
+            response.insert(
                 "total_cataloged".to_string(),
                 serde_json::json!(h.total_cataloged),
             );

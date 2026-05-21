@@ -190,6 +190,43 @@ fn test_cataloged_dir_retires_legacy_null_scan_rows() {
     );
 }
 
+#[test]
+fn test_newly_ignored_path_is_retired_on_full_scan() {
+    let root_tmp = TempDir::new().unwrap();
+    let root = root_tmp.path().to_path_buf();
+
+    std::fs::write(root.join("later-ignored.txt"), b"content").unwrap();
+
+    let (config, _db_tmp) = make_config(vec![root.clone()]);
+    let mut conn = db::open(&config.db_path).unwrap();
+
+    scanner::scan(&mut conn, &config, &empty_rules(&root)).unwrap();
+    let active_before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL AND path LIKE '%/later-ignored.txt'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_before, 1);
+
+    let rules = smriti::ignore::parse_smritiignore("later-ignored.txt\n", &root).unwrap();
+    let result = scanner::scan(&mut conn, &config, &rules).unwrap();
+
+    assert_eq!(result.tier1.deleted, 1);
+    let active_after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM paths WHERE disappeared IS NULL AND path LIKE '%/later-ignored.txt'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        active_after, 0,
+        "full scans should retire active rows that become ignored by policy"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // test_symlink_not_followed
 // ---------------------------------------------------------------------------

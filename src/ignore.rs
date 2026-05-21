@@ -119,10 +119,7 @@ pub fn parse_smritiignore(content: &str, base_dir: &Path) -> Result<SectionRules
         .build()
         .map_err(|e| SmritiError::Other(format!("failed to build catalog matcher: {e}")))?;
 
-    Ok(SectionRules {
-        ignored,
-        cataloged,
-    })
+    Ok(SectionRules { ignored, cataloged })
 }
 
 /// Compile the hardened defaults embedded in the binary.
